@@ -24,8 +24,9 @@ pub fn get_global_network_stats(state: State<'_, AppState>) -> GlobalNetworkStat
 
 #[tauri::command]
 pub fn get_process_network_list(state: State<'_, AppState>) -> Vec<ProcessNetworkInfo> {
-    let stats = state.telemetry.poll_global_stats();
+    let _ = state.telemetry.poll_global_stats();
     let sockets = state.telemetry.get_sockets_by_pid();
+    let measured_traffic = state.telemetry.get_measured_pid_traffic();
     let exclusive_state = state.service.local_engine.get_exclusive_state();
     
     // Get list of blocked paths from rules
@@ -37,8 +38,7 @@ pub fn get_process_network_list(state: State<'_, AppState>) -> Vec<ProcessNetwor
 
     let procs = state.process_mgr.get_processes_with_network(
         &sockets,
-        stats.download_speed_bps,
-        stats.upload_speed_bps,
+        &measured_traffic,
         exclusive_state.target_exe_path.as_deref(),
         &blocked_paths,
     );

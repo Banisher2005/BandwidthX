@@ -43,6 +43,8 @@ export interface ProcessNetworkInfo {
 export interface GlobalNetworkStats {
   download_speed_bps: number;
   upload_speed_bps: number;
+  app_download_bps?: number;
+  app_upload_bps?: number;
   total_download_bytes: number;
   total_upload_bytes: number;
   active_connections: number;

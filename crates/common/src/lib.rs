@@ -99,6 +99,10 @@ pub struct ProcessNetworkInfo {
 pub struct GlobalNetworkStats {
     pub download_speed_bps: u64,
     pub upload_speed_bps: u64,
+    #[serde(default)]
+    pub app_download_bps: u64,
+    #[serde(default)]
+    pub app_upload_bps: u64,
     pub total_download_bytes: u64,
     pub total_upload_bytes: u64,
     pub active_connections: usize,
