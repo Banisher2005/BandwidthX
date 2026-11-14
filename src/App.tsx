@@ -182,14 +182,14 @@ export function App() {
   };
 
   // Action: Toggle Exclusive Mode
-  const handleToggleExclusive = async (targetPid?: number, exePath?: string, appName?: string) => {
+  const handleToggleExclusive = async (targetPid?: number, exePath?: string, appName?: string, creationTime?: number) => {
     try {
       if (exclusiveState.is_active) {
         const res = await api.disableExclusiveMode();
         setExclusiveState(res);
         showNotification('Exclusive Mode disabled. Normal network access restored.');
       } else if (targetPid && exePath && appName) {
-        const res = await api.enableExclusiveMode(targetPid, exePath, appName);
+        const res = await api.enableExclusiveMode(targetPid, exePath, appName, creationTime);
         setExclusiveState(res);
         showNotification(`Exclusive Mode active for ${appName}! Other apps restricted.`);
       }

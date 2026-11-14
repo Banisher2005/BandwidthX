@@ -261,9 +261,9 @@ export const ApplicationsPage: React.FC<ApplicationsPageProps> = ({
                             <span>BLOCKED</span>
                           </span>
                         ) : proc.has_rules ? (
-                          <span className="inline-flex items-center space-x-1 px-2 py-0.5 rounded text-[11px] font-mono bg-[#E9B65C]/15 text-[#E9B65C] border border-[#E9B65C]/30">
+                          <span className="inline-flex items-center space-x-1 px-2 py-0.5 rounded text-[11px] font-mono bg-[#E9B65C]/15 text-[#E9B65C] border border-[#E9B65C]/30" title="Rate profile saved (packet-shaping unsupported in user-mode WFP ALE)">
                             <Sliders className="w-3 h-3" />
-                            <span>LIMITED</span>
+                            <span>LIMIT PROFILE (UNENFORCED)</span>
                           </span>
                         ) : (
                           <span className="inline-flex items-center space-x-1 px-2 py-0.5 rounded text-[11px] font-mono bg-[#91DB79]/15 text-[#91DB79] border border-[#91DB79]/30">
@@ -362,10 +362,10 @@ export const ApplicationsPage: React.FC<ApplicationsPageProps> = ({
                 />
               </div>
 
-              <div className="p-3 rounded-lg bg-[#192223]/50 border border-[#212D2E] flex items-start space-x-2 text-[11px] text-[#91A39A]">
-                <Info className="w-4 h-4 text-[#57C7B5] shrink-0 mt-0.5" />
+              <div className="p-3 rounded-lg bg-[#E9B65C]/10 border border-[#E9B65C]/30 flex items-start space-x-2 text-[11px] text-[#E9B65C]">
+                <Info className="w-4 h-4 shrink-0 mt-0.5" />
                 <span>
-                  Bandwidth limits configure application-level rate monitoring and quota enforcement. Hard blocks are enforced via WFP ALE kernel layers.
+                  <strong>Note on Bandwidth Shaping:</strong> Windows user-mode ALE layers enforce binary authorization (Allow/Block). Rate limits are saved as monitoring threshold profiles; active packet transmission pacing requires a kernel NDIS callout driver. Use <strong>Block</strong> or <strong>Exclusive Mode</strong> for active kernel-enforced restriction.
                 </span>
               </div>
 
@@ -383,9 +383,9 @@ export const ApplicationsPage: React.FC<ApplicationsPageProps> = ({
                     onSetLimit(limitModalProc);
                     setLimitModalProc(null);
                   }}
-                  className="px-4 py-2 rounded-lg bg-[#91DB79] hover:bg-[#91DB79]/90 text-[#0B0F10] font-bold"
+                  className="px-4 py-2 rounded-lg bg-[#E9B65C] hover:bg-[#E9B65C]/90 text-[#0B0F10] font-bold"
                 >
-                  Apply Rate Policy
+                  Save Limit Profile (Informational)
                 </button>
               </div>
             </div>

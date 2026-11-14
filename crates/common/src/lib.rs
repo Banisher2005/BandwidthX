@@ -52,6 +52,7 @@ pub struct NetworkRule {
 pub struct ExclusiveModeState {
     pub is_active: bool,
     pub target_pid: Option<u32>,
+    pub target_creation_time: Option<u64>,
     pub target_app_name: Option<String>,
     pub target_exe_path: Option<String>,
     pub allowed_exemptions: Vec<String>,
@@ -66,6 +67,7 @@ impl Default for ExclusiveModeState {
         Self {
             is_active: false,
             target_pid: None,
+            target_creation_time: None,
             target_app_name: None,
             target_exe_path: None,
             allowed_exemptions: vec![
@@ -85,6 +87,8 @@ impl Default for ExclusiveModeState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcessNetworkInfo {
     pub pid: u32,
+    #[serde(default)]
+    pub creation_time: u64,
     pub name: String,
     pub exe_path: String,
     pub download_bytes_sec: u64,
@@ -131,7 +135,10 @@ pub struct ServiceStatus {
 pub enum IpcRequest {
     Ping,
     GetStatus,
+    GetExclusiveState,
     EnableExclusiveMode {
+        target_pid: u32,
+        target_creation_time: u64,
         target_exe_path: String,
         target_app_name: String,
         exemptions: Vec<String>,
@@ -154,6 +161,7 @@ pub enum IpcResponse {
     Ok { message: String },
     Pong,
     Status(ServiceStatus),
+    ExclusiveState(ExclusiveModeState),
     FilterCount { count: u32 },
     Error { code: u32, message: String },
 }

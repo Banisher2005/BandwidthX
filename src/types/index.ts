@@ -25,6 +25,7 @@ export interface NetworkRule {
 
 export interface ProcessNetworkInfo {
   pid: number;
+  creation_time?: number;
   name: string;
   exe_path: string;
   download_bytes_sec: number;
@@ -57,6 +58,7 @@ export interface GlobalNetworkStats {
 export interface ExclusiveModeState {
   is_active: boolean;
   target_pid: number | null;
+  target_creation_time?: number | null;
   target_app_name: string | null;
   target_exe_path: string | null;
   allowed_exemptions: string[];

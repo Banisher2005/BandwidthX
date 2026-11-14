@@ -4,19 +4,26 @@ use parking_lot::Mutex;
 use windows_sys::Win32::NetworkManagement::IpHelper::{
     GetIfTable2, FreeMibTable, GetExtendedTcpTable, GetExtendedUdpTable,
     SetTcpEntry, GetPerTcpConnectionEStats, SetPerTcpConnectionEStats,
+    GetPerTcp6ConnectionEStats, SetPerTcp6ConnectionEStats,
     MIB_IF_TABLE2, TCP_TABLE_OWNER_PID_ALL, UDP_TABLE_OWNER_PID,
-    MIB_TCPROW_LH,
+    MIB_TCPROW_LH, MIB_TCP6ROW,
 };
 use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6};
 use bandwidthx_common::GlobalNetworkStats;
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub enum SocketTelemetryKey {
+    V4 { local_addr: u32, local_port: u32, remote_addr: u32, remote_port: u32 },
+    V6 { local_addr: [u8; 16], local_port: u32, remote_addr: [u8; 16], remote_port: u32 },
+}
 
 pub struct NetworkTelemetryEngine {
     last_sample_time: Mutex<Option<Instant>>,
     last_in_bytes: Mutex<u64>,
     last_out_bytes: Mutex<u64>,
     cached_stats: Mutex<GlobalNetworkStats>,
-    // Socket EStats tracking: (local_addr, local_port, remote_addr, remote_port) -> (last_in, last_out, last_time)
-    socket_estats_cache: Mutex<HashMap<(u32, u32, u32, u32), (u64, u64, Instant)>>,
+    // Socket EStats tracking for IPv4 & IPv6 with lifetime handling
+    socket_estats_cache: Mutex<HashMap<SocketTelemetryKey, (u64, u64, Instant)>>,
     // Measured traffic per PID from EStats
     measured_pid_traffic: Mutex<HashMap<u32, (u64, u64)>>,
 }
@@ -209,39 +216,49 @@ impl NetworkTelemetryEngine {
         stats
     }
 
-    /// Queries TCP EStats on active connections and aggregates genuine bytes by PID
+    /// Queries TCP EStats on active IPv4 and IPv6 connections and aggregates genuine bytes by PID
     fn sample_estats_traffic(&self) -> (u64, u64) {
         let now = Instant::now();
-        let mut size = 0u32;
         let mut pid_traffic: HashMap<u32, (u64, u64)> = HashMap::new();
+        let mut active_keys: std::collections::HashSet<SocketTelemetryKey> = std::collections::HashSet::new();
         let mut cache = self.socket_estats_cache.lock();
 
         unsafe {
+            // 1. IPv4 TCP EStats sampling
+            let mut size4 = 0u32;
             let _ = GetExtendedTcpTable(
                 std::ptr::null_mut(),
-                &mut size,
+                &mut size4,
                 0,
                 AF_INET as u32,
                 TCP_TABLE_OWNER_PID_ALL,
                 0,
             );
 
-            if size > 0 {
-                let mut buffer = vec![0u8; size as usize];
+            if size4 > 0 {
+                let mut buffer4 = vec![0u8; size4 as usize];
                 if GetExtendedTcpTable(
-                    buffer.as_mut_ptr() as *mut _,
-                    &mut size,
+                    buffer4.as_mut_ptr() as *mut _,
+                    &mut size4,
                     0,
                     AF_INET as u32,
                     TCP_TABLE_OWNER_PID_ALL,
                     0,
                 ) == 0 {
-                    let num_entries = *(buffer.as_ptr() as *const u32) as usize;
-                    let table_ptr = buffer.as_ptr().add(std::mem::size_of::<u32>()) as *const MIB_TCPROW_OWNER_PID_RAW;
+                    let num_entries = *(buffer4.as_ptr() as *const u32) as usize;
+                    let table_ptr = buffer4.as_ptr().add(std::mem::size_of::<u32>()) as *const MIB_TCPROW_OWNER_PID_RAW;
                     let rows = std::slice::from_raw_parts(table_ptr, num_entries);
 
                     for row in rows {
                         if row.state == 5 { // ESTABLISHED
+                            let key = SocketTelemetryKey::V4 {
+                                local_addr: row.local_addr,
+                                local_port: row.local_port,
+                                remote_addr: row.remote_addr,
+                                remote_port: row.remote_port,
+                            };
+                            active_keys.insert(key.clone());
+
                             let mut mib_row: MIB_TCPROW_LH = std::mem::zeroed();
                             mib_row.Anonymous.dwState = row.state;
                             mib_row.dwLocalAddr = row.local_addr;
@@ -274,7 +291,97 @@ impl NetworkTelemetryEngine {
                                 0,
                                 std::mem::size_of::<TCP_ESTATS_DATA_ROD_v0>() as u32,
                             ) == 0 {
-                                let key = (row.local_addr, row.local_port, row.remote_addr, row.remote_port);
+                                if let Some((prev_in, prev_out, prev_time)) = cache.get(&key) {
+                                    let dt = now.duration_since(*prev_time).as_secs_f64();
+                                    if dt > 0.05 {
+                                        let delta_in = if rod.data_bytes_in >= *prev_in {
+                                            ((rod.data_bytes_in - *prev_in) as f64 / dt) as u64
+                                        } else { 0 };
+
+                                        let delta_out = if rod.data_bytes_out >= *prev_out {
+                                            ((rod.data_bytes_out - *prev_out) as f64 / dt) as u64
+                                        } else { 0 };
+
+                                        let entry = pid_traffic.entry(row.owning_pid).or_insert((0, 0));
+                                        entry.0 += delta_in;
+                                        entry.1 += delta_out;
+                                    }
+                                }
+                                cache.insert(key, (rod.data_bytes_in, rod.data_bytes_out, now));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 2. IPv6 TCP EStats sampling
+            let mut size6 = 0u32;
+            let _ = GetExtendedTcpTable(
+                std::ptr::null_mut(),
+                &mut size6,
+                0,
+                AF_INET6 as u32,
+                TCP_TABLE_OWNER_PID_ALL,
+                0,
+            );
+
+            if size6 > 0 {
+                let mut buffer6 = vec![0u8; size6 as usize];
+                if GetExtendedTcpTable(
+                    buffer6.as_mut_ptr() as *mut _,
+                    &mut size6,
+                    0,
+                    AF_INET6 as u32,
+                    TCP_TABLE_OWNER_PID_ALL,
+                    0,
+                ) == 0 {
+                    let num_entries6 = *(buffer6.as_ptr() as *const u32) as usize;
+                    let table_ptr6 = buffer6.as_ptr().add(std::mem::size_of::<u32>()) as *const MIB_TCP6ROW_OWNER_PID_RAW;
+                    let rows6 = std::slice::from_raw_parts(table_ptr6, num_entries6);
+
+                    for row in rows6 {
+                        if row.state == 5 { // ESTABLISHED
+                            let key = SocketTelemetryKey::V6 {
+                                local_addr: row.local_addr,
+                                local_port: row.local_port,
+                                remote_addr: row.remote_addr,
+                                remote_port: row.remote_port,
+                            };
+                            active_keys.insert(key.clone());
+
+                            let mut mib_row6: MIB_TCP6ROW = std::mem::zeroed();
+                            mib_row6.State = row.state as i32;
+                            mib_row6.LocalAddr.u.Byte = row.local_addr;
+                            mib_row6.dwLocalScopeId = row.local_scope_id;
+                            mib_row6.dwLocalPort = row.local_port;
+                            mib_row6.RemoteAddr.u.Byte = row.remote_addr;
+                            mib_row6.dwRemoteScopeId = row.remote_scope_id;
+                            mib_row6.dwRemotePort = row.remote_port;
+
+                            let mut rw = TCP_ESTATS_DATA_RW_v0 { enable_collection: 1 };
+                            let _ = SetPerTcp6ConnectionEStats(
+                                &mib_row6,
+                                0,
+                                &mut rw as *mut _ as *mut u8,
+                                0,
+                                std::mem::size_of::<TCP_ESTATS_DATA_RW_v0>() as u32,
+                                0,
+                            );
+
+                            let mut rod: TCP_ESTATS_DATA_ROD_v0 = std::mem::zeroed();
+                            if GetPerTcp6ConnectionEStats(
+                                &mib_row6,
+                                0,
+                                std::ptr::null_mut(),
+                                0,
+                                0,
+                                std::ptr::null_mut(),
+                                0,
+                                0,
+                                &mut rod as *mut _ as *mut u8,
+                                0,
+                                std::mem::size_of::<TCP_ESTATS_DATA_ROD_v0>() as u32,
+                            ) == 0 {
                                 if let Some((prev_in, prev_out, prev_time)) = cache.get(&key) {
                                     let dt = now.duration_since(*prev_time).as_secs_f64();
                                     if dt > 0.05 {
@@ -299,8 +406,8 @@ impl NetworkTelemetryEngine {
             }
         }
 
-        // Clean up stale sockets from cache (older than 10 seconds)
-        cache.retain(|_, (_, _, t)| now.duration_since(*t).as_secs() < 10);
+        // Socket Lifetime Management: Evict sockets that are no longer active or older than 5s
+        cache.retain(|k, (_, _, t)| active_keys.contains(k) && now.duration_since(*t).as_secs() < 5);
 
         let mut total_app_down = 0u64;
         let mut total_app_up = 0u64;

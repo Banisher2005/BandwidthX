@@ -27,7 +27,7 @@ pub fn get_process_network_list(state: State<'_, AppState>) -> Vec<ProcessNetwor
     let _ = state.telemetry.poll_global_stats();
     let sockets = state.telemetry.get_sockets_by_pid();
     let measured_traffic = state.telemetry.get_measured_pid_traffic();
-    let exclusive_state = state.service.local_engine.get_exclusive_state();
+    let exclusive_state = state.service.get_exclusive_mode_state();
     
     // Get list of blocked paths from rules
     let rules = state.db.get_rules().unwrap_or_default();
@@ -55,21 +55,22 @@ pub fn get_process_network_list(state: State<'_, AppState>) -> Vec<ProcessNetwor
 
 #[tauri::command]
 pub fn get_exclusive_mode_state(state: State<'_, AppState>) -> ExclusiveModeState {
-    state.service.local_engine.get_exclusive_state()
+    state.service.get_exclusive_mode_state()
 }
 
 #[tauri::command]
 pub fn enable_exclusive_mode(
     state: State<'_, AppState>,
     target_pid: u32,
+    target_creation_time: Option<u64>,
     exe_path: String,
     app_name: String,
 ) -> Result<ExclusiveModeState, String> {
-    state.service.enable_exclusive_mode(target_pid, &exe_path, &app_name)
+    state.service.enable_exclusive_mode(target_pid, target_creation_time.unwrap_or(0), &exe_path, &app_name)
 }
 
 #[tauri::command]
-pub fn disable_exclusive_mode(state: State<'_, AppState>) -> ExclusiveModeState {
+pub fn disable_exclusive_mode(state: State<'_, AppState>) -> Result<ExclusiveModeState, String> {
     state.service.disable_exclusive_mode()
 }
 

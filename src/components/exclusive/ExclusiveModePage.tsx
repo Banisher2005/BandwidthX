@@ -19,7 +19,7 @@ interface ExclusiveModePageProps {
   exclusiveState: ExclusiveModeState;
   serviceStatus: ServiceStatus;
   processes: ProcessNetworkInfo[];
-  onToggleExclusive: (targetPid?: number, exePath?: string, appName?: string) => void;
+  onToggleExclusive: (targetPid?: number, exePath?: string, appName?: string, creationTime?: number) => void;
   onEmergencyRestore: () => void;
 }
 
@@ -51,7 +51,7 @@ export const ExclusiveModePage: React.FC<ExclusiveModePageProps> = ({
       onToggleExclusive();
     } else {
       if (selectedProcess) {
-        onToggleExclusive(selectedProcess.pid, selectedProcess.exe_path, selectedProcess.name);
+        onToggleExclusive(selectedProcess.pid, selectedProcess.exe_path, selectedProcess.name, selectedProcess.creation_time);
       }
     }
   };

@@ -126,6 +126,7 @@ impl ProcessManager {
 
             processes.push(ProcessNetworkInfo {
                 pid,
+                creation_time,
                 name,
                 exe_path,
                 download_bytes_sec: down_sec,

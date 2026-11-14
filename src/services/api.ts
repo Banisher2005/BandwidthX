@@ -37,8 +37,8 @@ export const api = {
   getGlobalNetworkStats: () => invokeBackend<GlobalNetworkStats>('get_global_network_stats'),
   getProcessNetworkList: () => invokeBackend<ProcessNetworkInfo[]>('get_process_network_list'),
   getExclusiveModeState: () => invokeBackend<ExclusiveModeState>('get_exclusive_mode_state'),
-  enableExclusiveMode: (target_pid: number, exe_path: string, app_name: string) => 
-    invokeBackend<ExclusiveModeState>('enable_exclusive_mode', { target_pid, exe_path, app_name }),
+  enableExclusiveMode: (target_pid: number, exe_path: string, app_name: string, target_creation_time?: number) => 
+    invokeBackend<ExclusiveModeState>('enable_exclusive_mode', { target_pid, exe_path, app_name, target_creation_time: target_creation_time || 0 }),
   disableExclusiveMode: () => invokeBackend<ExclusiveModeState>('disable_exclusive_mode'),
   getRules: () => invokeBackend<NetworkRule[]>('get_rules'),
   saveRule: (rule: NetworkRule) => invokeBackend<NetworkRule>('save_rule', { rule }),

@@ -127,7 +127,7 @@ export const RulesPage: React.FC<RulesPageProps> = ({
                           ? 'bg-[#57C7B5]/15 text-[#57C7B5] border border-[#57C7B5]/30'
                           : 'bg-[#E9B65C]/15 text-[#E9B65C] border border-[#E9B65C]/30'
                       }`}>
-                        {rule.rule_type.toUpperCase()}
+                        {rule.rule_type.includes('limit') ? 'LIMIT PROFILE (UNENFORCED)' : rule.rule_type.toUpperCase()}
                       </span>
                     </td>
                     <td className="py-3 px-3 font-mono uppercase text-[#91A39A]">
