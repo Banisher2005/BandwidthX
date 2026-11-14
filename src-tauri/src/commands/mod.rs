@@ -65,12 +65,12 @@ pub fn enable_exclusive_mode(
     exe_path: String,
     app_name: String,
 ) -> Result<ExclusiveModeState, String> {
-    state.service.local_engine.enable_exclusive_mode(target_pid, &exe_path, &app_name)
+    state.service.enable_exclusive_mode(target_pid, &exe_path, &app_name)
 }
 
 #[tauri::command]
 pub fn disable_exclusive_mode(state: State<'_, AppState>) -> ExclusiveModeState {
-    state.service.local_engine.disable_exclusive_mode()
+    state.service.disable_exclusive_mode()
 }
 
 #[tauri::command]
@@ -81,7 +81,7 @@ pub fn get_rules(state: State<'_, AppState>) -> Vec<NetworkRule> {
 #[tauri::command]
 pub fn save_rule(state: State<'_, AppState>, rule: NetworkRule) -> Result<NetworkRule, String> {
     if rule.enabled && rule.rule_type == bandwidthx_common::RuleType::Block {
-        let _ = state.service.local_engine.block_application(&rule.executable_path, &rule.app_name);
+        let _ = state.service.block_application(&rule.executable_path, &rule.app_name);
     }
     state.db.save_rule(&rule).map_err(|e| e.to_string())?;
     Ok(rule)
@@ -94,7 +94,7 @@ pub fn delete_rule(state: State<'_, AppState>, rule_id: String, _exe_path: Strin
 
 #[tauri::command]
 pub fn emergency_restore(state: State<'_, AppState>) -> bool {
-    state.service.local_engine.emergency_restore();
+    state.service.emergency_restore();
     true
 }
 

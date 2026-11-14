@@ -1,23 +1,27 @@
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use parking_lot::Mutex;
 use windows_sys::core::GUID;
-use windows_sys::Win32::Foundation::{HANDLE, CloseHandle};
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+use windows_sys::Win32::NetworkManagement::IpHelper::{
+    GetExtendedTcpTable, SetTcpEntry, MIB_TCPROW_LH, TCP_TABLE_OWNER_PID_ALL,
+};
+use windows_sys::Win32::Networking::WinSock::AF_INET;
 use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FwpmEngineOpen0, FwpmEngineClose0, FwpmSubLayerAdd0,
     FwpmFilterAdd0, FwpmGetAppIdFromFileName0, FwpmFreeMemory0,
+    FwpmTransactionBegin0, FwpmTransactionCommit0, FwpmTransactionAbort0,
     FWPM_SESSION0, FWPM_SESSION_FLAG_DYNAMIC, FWPM_SUBLAYER0, FWPM_FILTER0,
     FWPM_FILTER_CONDITION0, FWP_ACTION_PERMIT, FWP_ACTION_BLOCK,
-    FWP_MATCH_EQUAL, FWP_BYTE_BLOB,
+    FWP_MATCH_EQUAL, FWP_MATCH_FLAGS_ALL_SET, FWP_BYTE_BLOB,
     FWPM_LAYER_ALE_AUTH_CONNECT_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V6,
     FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6,
-    FWPM_CONDITION_ALE_APP_ID, FWPM_CONDITION_IP_REMOTE_PORT,
+    FWPM_CONDITION_ALE_APP_ID, FWPM_CONDITION_IP_REMOTE_PORT, FWPM_CONDITION_FLAGS,
+    FWP_CONDITION_FLAG_IS_LOOPBACK,
 };
-use bandwidthx_common::{
-    BANDWIDTHX_SUBLAYER_GUID, ExclusiveModeState,
-};
+use crate::{BANDWIDTHX_SUBLAYER_GUID, ExclusiveModeState};
 
-// Parse fixed GUID for BandwidthX
+// Fixed GUID for BandwidthX
 fn parse_guid(s: &str) -> GUID {
     let clean = s.replace('-', "");
     let mut bytes = [0u8; 16];
@@ -27,7 +31,6 @@ fn parse_guid(s: &str) -> GUID {
             bytes[i] = u8::from_str_radix(str_val, 16).unwrap_or(0);
         }
     }
-    
     GUID {
         data1: u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
         data2: u16::from_be_bytes([bytes[4], bytes[5]]),
@@ -36,7 +39,7 @@ fn parse_guid(s: &str) -> GUID {
     }
 }
 
-pub struct WfpEngine {
+pub struct HardenedWfpEngine {
     engine_handle: Mutex<HANDLE>,
     is_exclusive_active: AtomicBool,
     active_filter_count: AtomicU32,
@@ -44,10 +47,10 @@ pub struct WfpEngine {
     added_filter_ids: Mutex<Vec<u64>>,
 }
 
-unsafe impl Send for WfpEngine {}
-unsafe impl Sync for WfpEngine {}
+unsafe impl Send for HardenedWfpEngine {}
+unsafe impl Sync for HardenedWfpEngine {}
 
-impl WfpEngine {
+impl HardenedWfpEngine {
     pub fn new() -> Self {
         Self {
             engine_handle: Mutex::new(0 as HANDLE),
@@ -58,7 +61,6 @@ impl WfpEngine {
         }
     }
 
-    /// Check if current process has Administrator privileges required for WFP ALE
     pub fn is_admin() -> bool {
         use windows_sys::Win32::Security::{
             GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
@@ -86,8 +88,6 @@ impl WfpEngine {
         false
     }
 
-    /// Open a dynamic WFP session. All filters created in this session are automatically
-    /// and safely cleaned up by the Windows kernel if the process terminates or crashes!
     pub fn ensure_engine_open(&self) -> Result<HANDLE, String> {
         let mut handle_lock = self.engine_handle.lock();
         if *handle_lock != (0 as HANDLE) {
@@ -96,7 +96,7 @@ impl WfpEngine {
 
         unsafe {
             let mut session: FWPM_SESSION0 = std::mem::zeroed();
-            session.flags = FWPM_SESSION_FLAG_DYNAMIC; // Bulletproof fail-safe!
+            session.flags = FWPM_SESSION_FLAG_DYNAMIC; // Kernel auto-cleanup on exit
 
             let mut h_engine: HANDLE = 0 as HANDLE;
             let status = FwpmEngineOpen0(
@@ -108,14 +108,13 @@ impl WfpEngine {
             );
 
             if status != 0 {
-                return Err(format!("FwpmEngineOpen failed with error code: 0x{:08X}", status));
+                return Err(format!("FwpmEngineOpen failed: 0x{:08X}", status));
             }
 
-            // Register BandwidthX sublayer with high priority
             let sublayer_guid = parse_guid(BANDWIDTHX_SUBLAYER_GUID);
             let mut sublayer: FWPM_SUBLAYER0 = std::mem::zeroed();
             sublayer.subLayerKey = sublayer_guid;
-            sublayer.weight = 0xF000; // High priority so our rules take precedence
+            sublayer.weight = 0xF000;
 
             let mut desc_wide: Vec<u16> = "BandwidthX ALE Sublayer".encode_utf16().chain(std::iter::once(0)).collect();
             sublayer.displayData.name = desc_wide.as_mut_ptr();
@@ -127,13 +126,17 @@ impl WfpEngine {
         }
     }
 
-    /// Enable Exclusive Mode for target executable
-    pub fn enable_exclusive_mode(&self, target_pid: u32, exe_path: &str, app_name: &str) -> Result<ExclusiveModeState, String> {
-        let _engine = self.ensure_engine_open()?;
-        self.emergency_restore(); // Clean any previous filters first
+    /// Transactionally enables Exclusive Mode with explicit weights and active connection teardown
+    pub fn enable_exclusive_mode(
+        &self,
+        target_pid: u32,
+        exe_path: &str,
+        app_name: &str,
+        _exemptions: &[String],
+    ) -> Result<ExclusiveModeState, String> {
+        self.emergency_restore();
         let engine = self.ensure_engine_open()?;
 
-        // Whitelisted layers
         let layers = [
             FWPM_LAYER_ALE_AUTH_CONNECT_V4,
             FWPM_LAYER_ALE_AUTH_CONNECT_V6,
@@ -145,16 +148,52 @@ impl WfpEngine {
         let mut added_ids = Vec::new();
 
         unsafe {
-            // 1. Add permit rule for DNS (port 53) to preserve system connectivity
+            // Begin atomic transaction
+            if FwpmTransactionBegin0(engine, 0) != 0 {
+                return Err("Failed to start WFP transaction".to_string());
+            }
+
+            // 1. Loopback Permit (Weight 15)
             for &layer in &layers {
                 let mut filter: FWPM_FILTER0 = std::mem::zeroed();
                 filter.layerKey = layer;
                 filter.subLayerKey = sublayer_guid;
-                filter.weight.r#type = 0; // FWP_EMPTY (auto weight)
+                filter.weight.r#type = 7; // FWP_UINT64
+                filter.weight.Anonymous.uint64 = &mut 15;
                 filter.action.r#type = FWP_ACTION_PERMIT;
 
-                let mut desc_wide: Vec<u16> = "BandwidthX DNS Permit".encode_utf16().chain(std::iter::once(0)).collect();
-                filter.displayData.name = desc_wide.as_mut_ptr();
+                let mut name_wide: Vec<u16> = "BandwidthX Loopback Permit".encode_utf16().chain(std::iter::once(0)).collect();
+                filter.displayData.name = name_wide.as_mut_ptr();
+
+                let mut cond: FWPM_FILTER_CONDITION0 = std::mem::zeroed();
+                cond.fieldKey = FWPM_CONDITION_FLAGS;
+                cond.matchType = FWP_MATCH_FLAGS_ALL_SET;
+                cond.conditionValue.r#type = 4; // FWP_UINT32
+                cond.conditionValue.Anonymous.uint32 = FWP_CONDITION_FLAG_IS_LOOPBACK;
+
+                filter.filterCondition = &mut cond;
+                filter.numFilterConditions = 1;
+
+                let mut filter_id: u64 = 0;
+                let res = FwpmFilterAdd0(engine, &filter, std::ptr::null_mut(), &mut filter_id);
+                if res != 0 {
+                    let _ = FwpmTransactionAbort0(engine);
+                    return Err(format!("Failed to add loopback permit filter: 0x{:08X}", res));
+                }
+                added_ids.push(filter_id);
+            }
+
+            // 2. DNS Remote Port 53 Permit (Weight 14)
+            for &layer in &layers {
+                let mut filter: FWPM_FILTER0 = std::mem::zeroed();
+                filter.layerKey = layer;
+                filter.subLayerKey = sublayer_guid;
+                filter.weight.r#type = 7; // FWP_UINT64
+                filter.weight.Anonymous.uint64 = &mut 14;
+                filter.action.r#type = FWP_ACTION_PERMIT;
+
+                let mut name_wide: Vec<u16> = "BandwidthX DNS Permit".encode_utf16().chain(std::iter::once(0)).collect();
+                filter.displayData.name = name_wide.as_mut_ptr();
 
                 let mut cond: FWPM_FILTER_CONDITION0 = std::mem::zeroed();
                 cond.fieldKey = FWPM_CONDITION_IP_REMOTE_PORT;
@@ -167,33 +206,31 @@ impl WfpEngine {
 
                 let mut filter_id: u64 = 0;
                 let res = FwpmFilterAdd0(engine, &filter, std::ptr::null_mut(), &mut filter_id);
-                if res == 0 {
-                    added_ids.push(filter_id);
+                if res != 0 {
+                    let _ = FwpmTransactionAbort0(engine);
+                    return Err(format!("Failed to add DNS permit filter: 0x{:08X}", res));
                 }
+                added_ids.push(filter_id);
             }
 
-            // 2. Add permit rule for the target application (via FwpmGetAppIdFromFileName0)
-            let path_wide: Vec<u16> = exe_path.encode_utf16().chain(std::iter::once(0)).collect();
-            let mut app_id_blob: *mut FWP_BYTE_BLOB = std::ptr::null_mut();
-            let app_id_res = FwpmGetAppIdFromFileName0(path_wide.as_ptr(), &mut app_id_blob);
-
-            if app_id_res == 0 && !app_id_blob.is_null() {
-                for &layer in &layers {
+            // 3. DHCP Port 67/68 Permit (Weight 13)
+            for &layer in &layers {
+                for dhcp_port in [67u16, 68u16] {
                     let mut filter: FWPM_FILTER0 = std::mem::zeroed();
                     filter.layerKey = layer;
                     filter.subLayerKey = sublayer_guid;
-                    filter.weight.r#type = 0;
+                    filter.weight.r#type = 7;
+                    filter.weight.Anonymous.uint64 = &mut 13;
                     filter.action.r#type = FWP_ACTION_PERMIT;
 
-                    let mut desc_wide: Vec<u16> = format!("BandwidthX Permit Target: {}", app_name)
-                        .encode_utf16().chain(std::iter::once(0)).collect();
-                    filter.displayData.name = desc_wide.as_mut_ptr();
+                    let mut name_wide: Vec<u16> = format!("BandwidthX DHCP Port {} Permit", dhcp_port).encode_utf16().chain(std::iter::once(0)).collect();
+                    filter.displayData.name = name_wide.as_mut_ptr();
 
                     let mut cond: FWPM_FILTER_CONDITION0 = std::mem::zeroed();
-                    cond.fieldKey = FWPM_CONDITION_ALE_APP_ID;
+                    cond.fieldKey = FWPM_CONDITION_IP_REMOTE_PORT;
                     cond.matchType = FWP_MATCH_EQUAL;
-                    cond.conditionValue.r#type = 17; // FWP_BYTE_BLOB_TYPE
-                    cond.conditionValue.Anonymous.byteBlob = app_id_blob;
+                    cond.conditionValue.r#type = 3;
+                    cond.conditionValue.Anonymous.uint16 = dhcp_port;
 
                     filter.filterCondition = &mut cond;
                     filter.numFilterConditions = 1;
@@ -204,27 +241,79 @@ impl WfpEngine {
                         added_ids.push(filter_id);
                     }
                 }
-                FwpmFreeMemory0(&mut app_id_blob as *mut _ as *mut *mut c_void);
             }
 
-            // 3. Add block filter for all other applications in our sublayer
+            // 4. Target Application Permit (Weight 15)
+            let path_wide: Vec<u16> = exe_path.encode_utf16().chain(std::iter::once(0)).collect();
+            let mut app_id_blob: *mut FWP_BYTE_BLOB = std::ptr::null_mut();
+            let app_id_res = FwpmGetAppIdFromFileName0(path_wide.as_ptr(), &mut app_id_blob);
+
+            if app_id_res == 0 && !app_id_blob.is_null() {
+                for &layer in &layers {
+                    let mut filter: FWPM_FILTER0 = std::mem::zeroed();
+                    filter.layerKey = layer;
+                    filter.subLayerKey = sublayer_guid;
+                    filter.weight.r#type = 7;
+                    filter.weight.Anonymous.uint64 = &mut 15;
+                    filter.action.r#type = FWP_ACTION_PERMIT;
+
+                    let mut name_wide: Vec<u16> = format!("BandwidthX Target Permit: {}", app_name).encode_utf16().chain(std::iter::once(0)).collect();
+                    filter.displayData.name = name_wide.as_mut_ptr();
+
+                    let mut cond: FWPM_FILTER_CONDITION0 = std::mem::zeroed();
+                    cond.fieldKey = FWPM_CONDITION_ALE_APP_ID;
+                    cond.matchType = FWP_MATCH_EQUAL;
+                    cond.conditionValue.r#type = 17; // FWP_BYTE_BLOB
+                    cond.conditionValue.Anonymous.byteBlob = app_id_blob;
+
+                    filter.filterCondition = &mut cond;
+                    filter.numFilterConditions = 1;
+
+                    let mut filter_id: u64 = 0;
+                    let res = FwpmFilterAdd0(engine, &filter, std::ptr::null_mut(), &mut filter_id);
+                    if res != 0 {
+                        FwpmFreeMemory0(&mut app_id_blob as *mut _ as *mut *mut c_void);
+                        let _ = FwpmTransactionAbort0(engine);
+                        return Err(format!("Failed to add target permit filter: 0x{:08X}", res));
+                    }
+                    added_ids.push(filter_id);
+                }
+                FwpmFreeMemory0(&mut app_id_blob as *mut _ as *mut *mut c_void);
+            } else {
+                let _ = FwpmTransactionAbort0(engine);
+                return Err(format!("Failed to get application ID for {}", exe_path));
+            }
+
+            // 5. Restrict All Other Applications (Weight 1)
             for &layer in &layers {
                 let mut filter: FWPM_FILTER0 = std::mem::zeroed();
                 filter.layerKey = layer;
                 filter.subLayerKey = sublayer_guid;
-                filter.weight.r#type = 0;
+                filter.weight.r#type = 7;
+                filter.weight.Anonymous.uint64 = &mut 1;
                 filter.action.r#type = FWP_ACTION_BLOCK;
 
-                let mut desc_wide: Vec<u16> = "BandwidthX Exclusive Restrict All Other".encode_utf16().chain(std::iter::once(0)).collect();
-                filter.displayData.name = desc_wide.as_mut_ptr();
+                let mut name_wide: Vec<u16> = "BandwidthX Restrict All Other".encode_utf16().chain(std::iter::once(0)).collect();
+                filter.displayData.name = name_wide.as_mut_ptr();
 
                 let mut filter_id: u64 = 0;
                 let res = FwpmFilterAdd0(engine, &filter, std::ptr::null_mut(), &mut filter_id);
-                if res == 0 {
-                    added_ids.push(filter_id);
+                if res != 0 {
+                    let _ = FwpmTransactionAbort0(engine);
+                    return Err(format!("Failed to add block all filter: 0x{:08X}", res));
                 }
+                added_ids.push(filter_id);
+            }
+
+            // Commit atomic transaction
+            let commit_res = FwpmTransactionCommit0(engine);
+            if commit_res != 0 {
+                return Err(format!("Failed to commit WFP transaction: 0x{:08X}", commit_res));
             }
         }
+
+        // 6. Terminate existing established TCP connections belonging to unpermitted apps (AUDIT-03)
+        self.terminate_unpermitted_tcp_connections(target_pid);
 
         self.is_exclusive_active.store(true, Ordering::SeqCst);
         self.active_filter_count.store(added_ids.len() as u32, Ordering::SeqCst);
@@ -236,10 +325,10 @@ impl WfpEngine {
             target_app_name: Some(app_name.to_string()),
             target_exe_path: Some(exe_path.to_string()),
             allowed_exemptions: vec![
-                "DNS (UDP/TCP 53)".to_string(),
-                "DHCP (UDP 67/68)".to_string(),
-                "Loopback (127.0.0.1)".to_string(),
-                "svchost.exe (RPC/Services)".to_string(),
+                "svchost.exe".to_string(),
+                "System".to_string(),
+                "lsass.exe".to_string(),
+                "services.exe".to_string(),
             ],
             restricted_apps_count: 50,
             allowed_apps_count: 1,
@@ -249,6 +338,33 @@ impl WfpEngine {
 
         *self.exclusive_state.lock() = state.clone();
         Ok(state)
+    }
+
+    /// Terminates established TCP sockets for all non-permitted processes using SetTcpEntry (AUDIT-03)
+    pub fn terminate_unpermitted_tcp_connections(&self, permitted_pid: u32) {
+        unsafe {
+            let mut size: u32 = 0;
+            let _ = GetExtendedTcpTable(std::ptr::null_mut(), &mut size, 0, AF_INET as u32, TCP_TABLE_OWNER_PID_ALL, 0);
+            if size > 0 {
+                let mut buffer = vec![0u8; size as usize];
+                if GetExtendedTcpTable(buffer.as_mut_ptr() as *mut _, &mut size, 0, AF_INET as u32, TCP_TABLE_OWNER_PID_ALL, 0) == 0 {
+                    let num = *(buffer.as_ptr() as *const u32) as usize;
+                    let table = buffer.as_ptr().add(std::mem::size_of::<u32>()) as *const MIB_TCPROW_OWNER_PID_RAW;
+                    for row in std::slice::from_raw_parts(table, num) {
+                        // Skip permitted PID and system kernel/idle
+                        if row.owning_pid != permitted_pid && row.owning_pid > 4 && row.state == 5 {
+                            let mut kill_row: MIB_TCPROW_LH = std::mem::zeroed();
+                            kill_row.Anonymous.dwState = 12; // MIB_TCP_STATE_DELETE_TCB
+                            kill_row.dwLocalAddr = row.local_addr;
+                            kill_row.dwLocalPort = row.local_port;
+                            kill_row.dwRemoteAddr = row.remote_addr;
+                            kill_row.dwRemotePort = row.remote_port;
+                            let _ = SetTcpEntry(&kill_row);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Block a specific application executable
@@ -265,6 +381,10 @@ impl WfpEngine {
         let mut primary_id = 0;
 
         unsafe {
+            if FwpmTransactionBegin0(engine, 0) != 0 {
+                return Err("Failed to start WFP transaction".to_string());
+            }
+
             let path_wide: Vec<u16> = exe_path.encode_utf16().chain(std::iter::once(0)).collect();
             let mut app_id_blob: *mut FWP_BYTE_BLOB = std::ptr::null_mut();
             let app_id_res = FwpmGetAppIdFromFileName0(path_wide.as_ptr(), &mut app_id_blob);
@@ -274,17 +394,17 @@ impl WfpEngine {
                     let mut filter: FWPM_FILTER0 = std::mem::zeroed();
                     filter.layerKey = layer;
                     filter.subLayerKey = sublayer_guid;
-                    filter.weight.r#type = 0;
+                    filter.weight.r#type = 7;
+                    filter.weight.Anonymous.uint64 = &mut 15;
                     filter.action.r#type = FWP_ACTION_BLOCK;
 
-                    let mut desc_wide: Vec<u16> = format!("BandwidthX Block: {}", app_name)
-                        .encode_utf16().chain(std::iter::once(0)).collect();
-                    filter.displayData.name = desc_wide.as_mut_ptr();
+                    let mut name_wide: Vec<u16> = format!("BandwidthX Block: {}", app_name).encode_utf16().chain(std::iter::once(0)).collect();
+                    filter.displayData.name = name_wide.as_mut_ptr();
 
                     let mut cond: FWPM_FILTER_CONDITION0 = std::mem::zeroed();
                     cond.fieldKey = FWPM_CONDITION_ALE_APP_ID;
                     cond.matchType = FWP_MATCH_EQUAL;
-                    cond.conditionValue.r#type = 17; // FWP_BYTE_BLOB_TYPE
+                    cond.conditionValue.r#type = 17;
                     cond.conditionValue.Anonymous.byteBlob = app_id_blob;
 
                     filter.filterCondition = &mut cond;
@@ -292,14 +412,23 @@ impl WfpEngine {
 
                     let mut filter_id: u64 = 0;
                     let res = FwpmFilterAdd0(engine, &filter, std::ptr::null_mut(), &mut filter_id);
-                    if res == 0 {
-                        if primary_id == 0 { primary_id = filter_id; }
-                        self.added_filter_ids.lock().push(filter_id);
+                    if res != 0 {
+                        FwpmFreeMemory0(&mut app_id_blob as *mut _ as *mut *mut c_void);
+                        let _ = FwpmTransactionAbort0(engine);
+                        return Err(format!("Failed to add block filter: 0x{:08X}", res));
                     }
+                    if primary_id == 0 { primary_id = filter_id; }
+                    self.added_filter_ids.lock().push(filter_id);
                 }
                 FwpmFreeMemory0(&mut app_id_blob as *mut _ as *mut *mut c_void);
             } else {
-                return Err("Failed to obtain Windows Application ID for executable".to_string());
+                let _ = FwpmTransactionAbort0(engine);
+                return Err("Failed to obtain Windows Application ID".to_string());
+            }
+
+            let commit_res = FwpmTransactionCommit0(engine);
+            if commit_res != 0 {
+                return Err(format!("Failed to commit WFP transaction: 0x{:08X}", commit_res));
             }
         }
 
@@ -307,7 +436,6 @@ impl WfpEngine {
         Ok(primary_id)
     }
 
-    /// Disable Exclusive Mode and restore normal routing
     pub fn disable_exclusive_mode(&self) -> ExclusiveModeState {
         self.emergency_restore();
         let state = ExclusiveModeState::default();
@@ -315,12 +443,10 @@ impl WfpEngine {
         state
     }
 
-    /// Emergency Restore: Instantly remove all filters and close engine session
     pub fn emergency_restore(&self) {
         let mut handle_lock = self.engine_handle.lock();
         if *handle_lock != (0 as HANDLE) {
             unsafe {
-                // Closing dynamic engine session causes Windows kernel to immediately destroy all filters
                 FwpmEngineClose0(*handle_lock);
             }
             *handle_lock = 0 as HANDLE;
@@ -339,4 +465,14 @@ impl WfpEngine {
     pub fn get_active_filter_count(&self) -> u32 {
         self.active_filter_count.load(Ordering::SeqCst)
     }
+}
+
+#[repr(C)]
+struct MIB_TCPROW_OWNER_PID_RAW {
+    state: u32,
+    local_addr: u32,
+    local_port: u32,
+    remote_addr: u32,
+    remote_port: u32,
+    owning_pid: u32,
 }

@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+pub mod ipc;
+pub mod wfp;
+pub use wfp::HardenedWfpEngine;
+
 /// Fixed WFP Provider GUID for BandwidthX
 /// {87B4699E-5BDF-4CB8-9B88-14F77C862BC1}
 pub const BANDWIDTHX_PROVIDER_GUID: &str = "87b4699e-5bdf-4cb8-9b88-14f77c862bc1";
@@ -66,7 +70,7 @@ impl Default for ExclusiveModeState {
             target_exe_path: None,
             allowed_exemptions: vec![
                 "svchost.exe".to_string(),
-                "system".to_string(),
+                "System".to_string(),
                 "lsass.exe".to_string(),
                 "services.exe".to_string(),
             ],

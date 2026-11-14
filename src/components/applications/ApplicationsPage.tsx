@@ -10,7 +10,9 @@ import {
   ChevronDown, 
   ChevronUp,
   Globe,
-  Gauge
+  Gauge,
+  X,
+  Info
 } from 'lucide-react';
 import { ProcessNetworkInfo, NetworkRule } from '../../types';
 import { formatBytes, formatSpeed, truncateMiddle } from '../../utils/format';
@@ -39,6 +41,9 @@ export const ApplicationsPage: React.FC<ApplicationsPageProps> = ({
   const [sortField, setSortField] = useState<SortField>('speed');
   const [sortAsc, setSortAsc] = useState(false);
   const [selectedProcess, setSelectedProcess] = useState<ProcessNetworkInfo | null>(null);
+  const [limitModalProc, setLimitModalProc] = useState<ProcessNetworkInfo | null>(null);
+  const [limitValueKbps, setLimitValueKbps] = useState('2048');
+  const [limitType, setLimitType] = useState<'download_limit' | 'upload_limit' | 'bidirectional_limit'>('download_limit');
 
   // Filter & sort logic
   const filteredProcesses = useMemo(() => {
@@ -286,7 +291,7 @@ export const ApplicationsPage: React.FC<ApplicationsPageProps> = ({
 
                           {/* Set Limit */}
                           <button
-                            onClick={() => onSetLimit(proc)}
+                            onClick={() => setLimitModalProc(proc)}
                             className="p-1.5 rounded-lg bg-[#192223] hover:bg-[#212D2E] text-[#91A39A] hover:text-[#EDF5F0] border border-[#212D2E] transition-colors"
                             title="Configure Bandwidth Limits"
                           >
@@ -312,6 +317,81 @@ export const ApplicationsPage: React.FC<ApplicationsPageProps> = ({
           </table>
         </div>
       </div>
+      {/* Rate Limit Modal */}
+      {limitModalProc && (
+        <div className="fixed inset-0 bg-[#0B0F10]/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-[#12191A] border border-[#192223] rounded-2xl w-full max-w-md p-6 space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between pb-3 border-b border-[#192223]">
+              <div className="flex items-center space-x-2">
+                <Gauge className="w-5 h-5 text-[#91DB79]" />
+                <h3 className="text-base font-bold text-[#EDF5F0]">Configure Bandwidth Limit</h3>
+              </div>
+              <button onClick={() => setLimitModalProc(null)} className="text-[#91A39A] hover:text-[#EDF5F0]">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div className="p-3 rounded-lg bg-[#0B0F10] border border-[#192223]">
+                <div className="font-semibold text-sm text-[#EDF5F0]">{limitModalProc.name}</div>
+                <div className="text-[11px] font-mono text-[#91A39A] truncate">{limitModalProc.exe_path}</div>
+              </div>
+
+              <div>
+                <label className="block text-[#91A39A] mb-1">Limit Type</label>
+                <select
+                  value={limitType}
+                  onChange={(e) => setLimitType(e.target.value as any)}
+                  className="w-full px-3 py-2 rounded-lg bg-[#0B0F10] border border-[#192223] text-xs text-[#EDF5F0] focus:outline-none focus:border-[#91DB79]"
+                >
+                  <option value="download_limit">Download Limit (Inbound)</option>
+                  <option value="upload_limit">Upload Limit (Outbound)</option>
+                  <option value="bidirectional_limit">Bidirectional Limit</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[#91A39A] mb-1">Speed Cap (KB/s)</label>
+                <input
+                  type="number"
+                  min="64"
+                  step="64"
+                  value={limitValueKbps}
+                  onChange={(e) => setLimitValueKbps(e.target.value)}
+                  className="w-full px-3 py-2 rounded-lg bg-[#0B0F10] border border-[#192223] text-xs text-[#EDF5F0] focus:outline-none focus:border-[#91DB79]"
+                />
+              </div>
+
+              <div className="p-3 rounded-lg bg-[#192223]/50 border border-[#212D2E] flex items-start space-x-2 text-[11px] text-[#91A39A]">
+                <Info className="w-4 h-4 text-[#57C7B5] shrink-0 mt-0.5" />
+                <span>
+                  Bandwidth limits configure application-level rate monitoring and quota enforcement. Hard blocks are enforced via WFP ALE kernel layers.
+                </span>
+              </div>
+
+              <div className="pt-2 flex items-center justify-end space-x-3">
+                <button
+                  type="button"
+                  onClick={() => setLimitModalProc(null)}
+                  className="px-4 py-2 rounded-lg bg-[#192223] hover:bg-[#212D2E] text-[#EDF5F0]"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onSetLimit(limitModalProc);
+                    setLimitModalProc(null);
+                  }}
+                  className="px-4 py-2 rounded-lg bg-[#91DB79] hover:bg-[#91DB79]/90 text-[#0B0F10] font-bold"
+                >
+                  Apply Rate Policy
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

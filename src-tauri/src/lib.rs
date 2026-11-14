@@ -59,7 +59,7 @@ pub fn run() {
             if let tauri::RunEvent::Exit = event {
                 // Ensure all dynamic WFP filters are cleaned up on exit
                 if let Some(state) = app_handle.try_state::<AppState>() {
-                    state.service.local_engine.emergency_restore();
+                    state.service.emergency_restore();
                 }
             }
         });

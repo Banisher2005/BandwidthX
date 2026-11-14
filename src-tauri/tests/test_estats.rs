@@ -1,7 +1,7 @@
 use windows_sys::Win32::NetworkManagement::IpHelper::{
     GetExtendedTcpTable, TCP_TABLE_OWNER_PID_ALL,
     GetPerTcpConnectionEStats, SetPerTcpConnectionEStats,
-    TCP_ESTATS_TYPE, MIB_TCPROW_LH,
+    MIB_TCPROW_LH,
 };
 use windows_sys::Win32::Networking::WinSock::AF_INET;
 
