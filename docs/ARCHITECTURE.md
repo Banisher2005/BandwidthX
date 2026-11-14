@@ -29,14 +29,20 @@ BandwidthX is a high-performance Windows desktop networking utility engineered f
 +-------------------------------------------------------------+
                               |
             Named Pipe: \\.\pipe\BandwidthX_IPC
-          (SDDL DACL: LocalSystem + Builtin Admin Only)
+          (Fail-Closed SDDL: LocalSystem + Builtin Admin)
+          (Verified DACL Kernel Descriptor)
           (4-byte Big-Endian Length-Prefixed Framing)
                               |
 +-------------------------------------------------------------+
 |            BandwidthX Privileged Windows Service            |
 |                                                             |
+|  - Windows SCM Dispatcher (StartServiceCtrlDispatcherW)     |
+|  - ServiceMain & RegisterServiceCtrlHandlerExW              |
+|  - State Transitions (START_PENDING -> RUNNING -> STOPPED)  |
+|  - Service Recovery Actions (SERVICE_CONFIG_FAILURE_ACTIONS)|
+|  - Client Impersonation & SID Check (CheckTokenMembership)  |
 |  - Client Elevation Auth (TokenElevation & Caller PID)      |
-|  - Process Validation (QueryFullProcessImage & ProcessTimes)|
+|  - Process Handle Pinning & Revalidation (WaitForSingleObj) |
 |  - Windows Filtering Platform (HardenedWfpEngine)           |
 |  - Atomic Transactions (Begin0 / Commit0 / Abort0)          |
 |  - Explicit Weights (15 > 14 > 13 > 10 > 1)                 |
@@ -44,17 +50,40 @@ BandwidthX is a high-performance Windows desktop networking utility engineered f
 |  - Dynamic Session Management (FWPM_SESSION_FLAG_DYNAMIC)   |
 |  - Essential Service Whitelisting (DNS/DHCP/Core Services)  |
 |  - Fail-Safe Emergency Restoration                          |
-|  - Windows SCM CLI Lifecycle (--install/--start/--status)   |
+|  - SCM Management CLI (--install/--start/--stop/--console)  |
 +-------------------------------------------------------------+
 ```
 
 ---
 
-## 2. Real-Time Telemetry & Metric Attribution
+## 2. Windows Service Control Manager (SCM) Dispatcher Architecture
 
-### Proportional Estimation Elimination
-Earlier prototypes distributed aggregate interface throughput among running processes based on active socket counts (`process_sockets / total_sockets`). This resulted in severe misattribution: idle applications holding multiple persistent keep-alive sockets appeared to consume significant bandwidth, while high-throughput single-socket streams showed minimal traffic.
+### SCM Dispatcher Integration
+The privileged service binary (`bandwidthx-service.exe`) implements the native Windows Service Control Manager dispatcher protocol:
+1. **Entrypoint Dispatch**: When started without arguments, `main()` invokes `StartServiceCtrlDispatcherW`.
+   - If invoked by the Windows SCM, the dispatcher thread connects to the SCM and calls `service_main`.
+   - If invoked interactively from a terminal/console, `StartServiceCtrlDispatcherW` fails with `ERROR_FAILED_SERVICE_CONTROLLER_CONNECT` (1063), and the executable automatically falls back to interactive console mode for development and testing.
+2. **ServiceMain Execution**:
+   - `service_main` registers the extended control handler via `RegisterServiceCtrlHandlerExW`.
+   - Immediately transitions to `SERVICE_START_PENDING`.
+   - Initializes a Tokio multi-threaded asynchronous runtime.
+   - Transitions to `SERVICE_RUNNING` and accepts `SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN`.
+3. **Control Handler & Graceful Teardown**:
+   - Upon receiving `SERVICE_CONTROL_STOP` or `SERVICE_CONTROL_SHUTDOWN`, the handler transitions to `SERVICE_STOP_PENDING`.
+   - Signals the Tokio async server loop via a broadcast channel.
+   - Performs an emergency WFP policy flush (`engine.emergency_restore()`), guaranteeing that controlled shutdowns never leave the network filtered.
+   - Transitions to `SERVICE_STOPPED` and terminates cleanly.
+4. **Service Failure Recovery Actions**:
+   - During service registration (`--install`), `ChangeServiceConfig2W` configures `SERVICE_CONFIG_FAILURE_ACTIONS`:
+     - 1st Failure: Automatic restart after 5,000ms.
+     - 2nd Failure: Automatic restart after 10,000ms.
+     - Reset Period: 86,400s (24 hours).
 
+---
+
+## 3. Real-Time Telemetry & Metric Attribution
+
+### Direct Byte-Level Attribution
 BandwidthX eliminates socket-proportional estimation and implements **direct byte-level attribution**:
 1. **Interface Throughput**: `GetIfTable2` queries operational network adapters (`IF_TYPE_ETHERNET_CSMACD`, `IF_TYPE_IEEE80211`). Delta calculations across sampling intervals produce genuine total download and upload rates. Application totals are kept distinct from interface totals.
 2. **Dual-Stack TCP Extended Statistics (EStats)**:
@@ -72,11 +101,11 @@ BandwidthX eliminates socket-proportional estimation and implements **direct byt
    - Operating systems recycle Process IDs rapidly. If an application exits and a new process inherits its PID, stale metrics could be misattributed.
    - BandwidthX queries kernel process creation timestamps via `GetProcessTimes`. When a PID's creation timestamp changes, the process tracker invalidates stale metrics and reinitializes socket tracking for the new process image.
 6. **Inaccessible Process Handling**:
-   - Protected system processes (e.g. anti-cheat or DRM-protected software returning `ERROR_ACCESS_DENIED` / code 5) are gracefully handled using `PROCESS_QUERY_LIMITED_INFORMATION`, ensuring continuous telemetry without application crashes.
+   - Protected system processes (returning `ERROR_ACCESS_DENIED` / code 5) are gracefully handled using `PROCESS_QUERY_LIMITED_INFORMATION`, ensuring continuous telemetry without application crashes.
 
 ---
 
-## 3. Hardened Windows Filtering Platform (WFP) Engine
+## 4. Hardened Windows Filtering Platform (WFP) Engine
 
 ### ALE Authorization Layers
 Network filtering is enforced at the Windows Filtering Platform Application Layer Enforcement (ALE) kernel layers:
@@ -86,17 +115,11 @@ Network filtering is enforced at the Windows Filtering Platform Application Laye
 - `FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6` (0xA3B42C24-B6E9-4720-B757-0B867252D3F3)
 
 ### Transactional Atomicity
-To avoid intermediate inconsistent filtering states where legitimate traffic might be dropped during policy reconfiguration:
-- All filter additions and deletions are wrapped in kernel transactions:
-  ```c
-  FwpmTransactionBegin0(engine, 0);
-  // Add Loopback, DNS, DHCP, Core Services, Target Permit, and Block Filters...
-  FwpmTransactionCommit0(engine);
-  ```
-- If any filter installation fails (e.g., due to invalid binary path or privilege issue), `FwpmTransactionAbort0` immediately rolls back the transaction with zero side effects.
+- All filter additions and deletions are wrapped in kernel transactions (`FwpmTransactionBegin0` / `Commit0`).
+- If any filter installation fails, `FwpmTransactionAbort0` immediately rolls back the transaction with zero side effects.
 
 ### Explicit Filter Arbitration & Weights
-Filters without explicit weights are arbitrated non-deterministically by WFP. BandwidthX assigns strict numerical weights to ensure predictable evaluation:
+Filters without explicit weights are arbitrated non-deterministically by WFP. BandwidthX assigns strict numerical weights:
 
 | Filter Type | Layer | Match Condition | Action | Weight |
 |---|---|---|---|---|
@@ -107,78 +130,44 @@ Filters without explicit weights are arbitrated non-deterministically by WFP. Ba
 | **Core System Services** | ALE Connect / Recv-Accept (v4 & v6) | `FWPM_CONDITION_ALE_APP_ID` in (`svchost`, `lsass`, `services`) | `FWP_ACTION_PERMIT` | `10` |
 | **Default Restriction** | ALE Connect / Recv-Accept (v4 & v6) | All other applications | `FWP_ACTION_BLOCK` | `1` |
 
-Because Permit rules have higher weights (10 to 15) than the Restrict rule (1), allowed traffic passes unhindered while non-target applications are blocked.
-
 ### Active Established Connection Teardown
-ALE authorization filters evaluate new connection handshakes (`AUTH_CONNECT` / `AUTH_RECV_ACCEPT`). However, already-established TCP connections bypass ALE connect authorization.
-
-To prevent background applications from continuing to download or upload on existing streams:
-- Upon activating Exclusive Mode, BandwidthX enumerates all active TCP entries via `GetExtendedTcpTable`.
+ALE authorization filters evaluate new connection handshakes (`AUTH_CONNECT` / `AUTH_RECV_ACCEPT`). To prevent background applications from continuing on existing streams:
 - **Target Application Protection**: Sockets owned by the chosen target application (`permitted_pid`) are **strictly excluded** from teardown, guaranteeing ongoing sessions survive policy activation without interruption.
 - **System Exempt Protection**: System processes (`svchost.exe`, `lsass.exe`, `services.exe`) and kernel PIDs (0, 4) are excluded.
-- Sockets belonging to unpermitted processes are reset by calling `SetTcpEntry` with:
-  ```rust
-  row.dwState = MIB_TCP_STATE_DELETE_TCB; // 12
-  SetTcpEntry(&row);
-  ```
-- This forces an immediate TCP RST packet, terminating unpermitted flows at the kernel level.
-- Unpermitted IPv6 sockets are actively inspected and tracked.
+- Sockets belonging to unpermitted processes are reset by calling `SetTcpEntry` with `MIB_TCP_STATE_DELETE_TCB` (12).
+- Failed teardown operations are logged and surfaced via `TeardownReport`.
+- IPv6 Established Connection Boundary: The Windows user-mode IP Helper API lacks `SetTcp6Entry`. While unmanaged IPv6 connections cannot currently be forcefully terminated via IP Helper, ALE filters block all subsequent packet handshakes.
 
 ---
 
-## 4. Dynamic Session Safety Guarantee (`FWPM_SESSION_FLAG_DYNAMIC`)
+## 5. Fail-Closed IPC Security & Process Validation
 
-Networking tools must guarantee that user network connectivity can never be permanently damaged by software failures.
-
-BandwidthX enforces dynamic kernel sessions:
-1. `FwpmEngineOpen0` is always initialized with:
-   ```c
-   session.flags = FWPM_SESSION_FLAG_DYNAMIC;
-   ```
-2. Dynamic sessions instruct the Windows kernel to bind all sublayers, filters, and state to the lifetime of the session handle.
-3. If the BandwidthX process or service crashes, terminates unexpectedly, or if the machine is powered off, the Windows kernel **automatically purges all BandwidthX filters immediately**.
-4. A prominent red **Emergency Restore** action is available across all views to immediately close the session and restore standard networking.
-
----
-
-## 5. Privileged Service & Named Pipe IPC
-
-### Architecture & Security
+### Fail-Closed Named Pipe IPC
 - **Pipe Address**: `\\.\pipe\BandwidthX_IPC`
 - **Security Descriptor (SDDL DACL)**: `D:(A;;GA;;;BA)(A;;GA;;;SY)`
   - Explicitly grants Generic All (`GA`) only to `BUILTIN\Administrators` (`BA`) and `NT AUTHORITY\LocalSystem` (`SY`).
-  - Blocks all unprivileged standard user processes from establishing connections to the pipe.
-- **Framing Protocol**: Messages use a robust 4-byte big-endian length prefix:
-  ```
-  +-------------------------+----------------------------------+
-  | Length Prefix (4 bytes) | JSON Payload (UTF-8 Encoded)     |
-  +-------------------------+----------------------------------+
-  ```
-  - Maximum frame size is strictly capped at 1 MB (`MAX_IPC_FRAME_SIZE`) to prevent memory exhaustion from malformed requests.
+  - No unsecured fallback: service startup immediately aborts if secure pipe creation fails.
+  - Pipe handle security descriptor is authoritatively verified via `GetKernelObjectSecurity`.
+- **Framing Protocol**: 4-byte big-endian length prefix with a strict 1 MB maximum payload bound.
 
-### Client Authentication & Target Process Validation
-- **Caller Authentication**: On every IPC connection, the service extracts the client PID using `GetNamedPipeClientProcessId`. It opens the client process token via `OpenProcessToken` and inspects `TokenElevation`. Callers lacking administrative privileges are rejected with HTTP 403 / Access Denied.
-- **Target Process Validation**: The service independently verifies the claimed process:
-  1. Opens process handle with `PROCESS_QUERY_LIMITED_INFORMATION`.
-  2. Queries executable path via `QueryFullProcessImageNameW` and verifies path equality.
-  3. Queries process creation timestamp via `GetProcessTimes` and verifies it matches within 200ms.
-  4. Rejects dead PIDs, recycled PIDs, kernel PIDs (0, 4), and mismatched paths.
+### Complete Client Authorization
+1. Client PID is queried via `GetNamedPipeClientProcessId`.
+2. The server invokes `ImpersonateNamedPipeClient` to adopt the client's security context.
+3. `CheckTokenMembership` verifies whether the client is a member of the Builtin Administrators group SID (`S-1-5-32-544`).
+4. `RevertToSelf()` restores service context.
+5. Client process token is inspected for `TokenElevation`. Both checks must succeed.
 
-### Windows Service Lifecycle (SCM)
-The standalone service includes full Windows Service Control Manager integration:
-```powershell
-bandwidthx-service.exe --install     # Registers auto-start service with SCM
-bandwidthx-service.exe --uninstall   # Removes service from SCM
-bandwidthx-service.exe --start       # Starts service via SCM
-bandwidthx-service.exe --stop        # Stops service via SCM
-bandwidthx-service.exe --status      # Queries service status from SCM
-bandwidthx-service.exe --version     # Displays version info
-```
+### Process Identity Lifetime Pinning & Race Prevention
+1. Nonzero creation timestamp required (`claimed_creation_time > 0`).
+2. Kernel handle is opened with `PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE`.
+3. Holding this open `HANDLE` prevents the Windows kernel from destroying the `EPROCESS` block, guaranteeing that the PID cannot be recycled while policy preparation occurs.
+4. Creation timestamp and executable path are verified.
+5. Immediately prior to WFP commitment, `WaitForSingleObject(handle, 0)` checks that the target process is still running. If the process terminated, policy enforcement is safely aborted.
 
 ---
 
 ## 6. Technical Enforcement Boundaries & Disclosures
 
-- **Binary Authorization (WFP ALE)**: BandwidthX operates at user-mode WFP ALE layers (`ALE_AUTH_CONNECT` / `ALE_AUTH_RECV_ACCEPT`). ALE performs binary authorization: packets matching the policy are permitted (`FWP_ACTION_PERMIT`) or blocked (`FWP_ACTION_BLOCK`).
-- **Rate Limit Policy Profiles**: Rate limit values (KB/s upload/download) configured in the UI are saved as persistent policy profiles.
-- **Packet Shaping Distinction**: True rate limiting and packet-level transmission pacing (token bucket, leaky bucket, or bandwidth shaping) requires an NDIS Callout driver or kernel transport callout. BandwidthX clearly identifies rate limits as "LIMIT PROFILE (UNENFORCED)" in the UI to maintain absolute engineering honesty and technical transparency.
+- **Binary Authorization (WFP ALE)**: BandwidthX operates at user-mode WFP ALE layers (`ALE_AUTH_CONNECT` / `ALE_AUTH_RECV_ACCEPT`). ALE performs binary authorization (Permit vs Block).
+- **Rate Limit Policy Profiles**: Rate limit values configured in the UI are stored as persistent policy profiles.
+- **Packet-Level Traffic Shaping**: Fine-grained per-packet transmission pacing (token bucket or queue shaping) requires a kernel NDIS Callout driver. Rate limits are clearly presented as "LIMIT PROFILE (UNENFORCED)" in the UI to maintain absolute technical transparency.

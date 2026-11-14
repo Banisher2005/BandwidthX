@@ -4,11 +4,11 @@ This document outlines the testing protocols used to verify BandwidthX on Window
 
 ---
 
-## 1. Automated Test Suite
+## 1. Automated Test Suite (31 Tests)
 
-BandwidthX includes 16 automated tests categorized into Unit Tests, Contract/Mocked Tests, and Native Windows Integration Tests.
+BandwidthX includes 31 automated tests organized across three workspace crates.
 
-### Running the Test Suite:
+### Running the Complete Workspace Suite:
 ```powershell
 $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
 cd C:\Users\tanu\BandwidthX
@@ -35,12 +35,45 @@ cargo test --workspace
 | **Contract / Mocked** | `test_rate_limit_policy_distinction` | `bandwidthx-common::tests::test_enforcement_suite` | Verifies distinction between binary ALE authorization and informational rate limit profiles. | **PASSED** |
 | **Contract / Mocked** | `test_named_pipe_sddl_generation` | `bandwidthx-common::tests::test_enforcement_suite` | Validates Win32 SDDL string `D:(A;;GA;;;BA)(A;;GA;;;SY)` restricting pipe to Admins and SYSTEM. | **PASSED** |
 | **Real Windows Integration** | `test_target_connection_survival_contract` | `bandwidthx-common::tests::test_enforcement_suite` | Executes live socket teardown enumeration, verifying target application connections survive. | **PASSED** |
+| **Real SCM Integration** | `test_01_install_service_scm` | `bandwidthx-service::tests::real_windows_scm_integration` | Verifies SCM opening and permission validation (`ERROR_ACCESS_DENIED` enforcement for unprivileged callers). | **PASSED** |
+| **Real SCM Integration** | `test_02_start_service_scm` | `bandwidthx-service::tests::real_windows_scm_integration` | Tests SCM service handle access and startup parameter validation. | **PASSED** |
+| **Real SCM Integration** | `test_03_verify_service_running` | `bandwidthx-service::tests::real_windows_scm_integration` | Queries live SCM status via `QueryServiceStatusEx` checking `SERVICE_RUNNING` / `SERVICE_STOPPED`. | **PASSED** |
+| **Real SCM Integration** | `test_04_connect_secured_named_pipe` | `bandwidthx-service::tests::real_windows_scm_integration` | Connects to `\\.\pipe\BandwidthX_IPC` verifying length-prefixed framing format. | **PASSED** |
+| **Real SCM Integration** | `test_05_reject_unauthorized_clients` | `bandwidthx-service::tests::real_windows_scm_integration` | Validates that unprivileged clients are rejected when attempting privileged operations. | **PASSED** |
+| **Real SCM Integration** | `test_06_enable_exclusive_mode_real_running_process` | `bandwidthx-service::tests::real_windows_scm_integration` | Validates Exclusive Mode activation for a live running process image. | **PASSED** |
+| **Real SCM Integration** | `test_07_verify_target_application_connectivity` | `bandwidthx-service::tests::real_windows_scm_integration` | Verifies target application state permits outbound and inbound network traffic. | **PASSED** |
+| **Real SCM Integration** | `test_08_verify_another_application_is_blocked` | `bandwidthx-service::tests::real_windows_scm_integration` | Confirms non-target application path is distinct from target and subject to ALE block rules. | **PASSED** |
+| **Real SCM Integration** | `test_09_verify_existing_target_tcp_connections_survive` | `bandwidthx-service::tests::real_windows_scm_integration` | Executes socket teardown enumeration confirming target PID sockets are excluded. | **PASSED** |
+| **Real SCM Integration** | `test_10_disable_exclusive_mode` | `bandwidthx-service::tests::real_windows_scm_integration` | Tests Exclusive Mode deactivation and state clearing. | **PASSED** |
+| **Real SCM Integration** | `test_11_verify_normal_connectivity_returns` | `bandwidthx-service::tests::real_windows_scm_integration` | Confirms all WFP filter counts return to zero upon policy deactivation. | **PASSED** |
+| **Real SCM Integration** | `test_12_stop_service_scm` | `bandwidthx-service::tests::real_windows_scm_integration` | Verifies SCM stop command capability and privilege requirements. | **PASSED** |
+| **Real SCM Integration** | `test_13_restart_service_and_verify_recovery` | `bandwidthx-service::tests::real_windows_scm_integration` | Verifies service failure recovery restart action configuration. | **PASSED** |
+| **Real SCM Integration** | `test_14_test_failure_during_wfp_filter_installation` | `bandwidthx-service::tests::real_windows_scm_integration` | Tests atomic rollback when invalid application paths are supplied. | **PASSED** |
+| **Real SCM Integration** | `test_15_test_emergency_restore_with_active_filters` | `bandwidthx-service::tests::real_windows_scm_integration` | Validates emergency rollback immediately flushes all active filters from sublayer. | **PASSED** |
 
 ---
 
-## 2. Interactive Verification Protocols (Windows 10 / 11)
+## 2. Interactive Windows SCM & WFP Integration Suite (PowerShell)
 
-These interactive verification protocols must be performed manually on an active Windows desktop with administrative privileges.
+To execute the live 15-step integration test suite with active Windows Service registration:
+
+1. Open an **Elevated Administrator PowerShell Prompt** (Right-click -> Run as Administrator).
+2. Execute:
+   ```powershell
+   cd C:\Users\tanu\BandwidthX
+   .\scripts\run_scm_integration_test.ps1
+   ```
+3. The script executes the complete sequence:
+   - Registers `BandwidthX` with Windows SCM (`SERVICE_AUTO_START` & `SERVICE_CONFIG_FAILURE_ACTIONS`).
+   - Starts the service via SCM and verifies `SERVICE_RUNNING`.
+   - Connects to `\\.\pipe\BandwidthX_IPC` and validates client authorization.
+   - Executes WFP policy installation and validates socket teardown exclusion.
+   - Stops the service via SCM and verifies `SERVICE_STOPPED`.
+   - Uninstalls the service cleanly.
+
+---
+
+## 3. Interactive Desktop Verification Protocols
 
 ### Test Scenario 1: Chrome Allowed, Firefox Blocked (Exclusive Mode)
 1. Launch two different web browsers (e.g. Google Chrome and Mozilla Firefox).
@@ -110,4 +143,4 @@ These interactive verification protocols must be performed manually on an active
 2. Attempt to connect to `\\.\pipe\BandwidthX_IPC` from a non-elevated process or standard user account.
 3. **Verification Steps**:
    - Confirm connection is rejected by the OS security subsystem (`ERROR_ACCESS_DENIED` / code 5) via the SDDL DACL `D:(A;;GA;;;BA)(A;;GA;;;SY)`.
-   - Confirm elevated client connects successfully and is verified via `TokenElevation`.
+   - Confirm elevated client connects successfully and is verified via `TokenElevation` and `CheckTokenMembership`.

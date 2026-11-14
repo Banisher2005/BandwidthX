@@ -124,10 +124,10 @@ fn test_target_connection_survival_contract() {
     
     // Sockets belonging to current_pid (target app) and system processes must never be killed
     let exempt_pids = engine.get_system_exempt_pids();
-    let (ipv4_killed, ipv6_tracked) = engine.terminate_unpermitted_tcp_connections(current_pid, &exempt_pids);
+    let report = engine.terminate_unpermitted_tcp_connections(current_pid, &exempt_pids);
     
     // Verifies the method executes without crashing or deleting own sockets
-    let _ = (ipv4_killed, ipv6_tracked);
+    let _ = (report.ipv4_terminated, report.ipv6_unmanaged, report.ipv4_failed);
 }
 
 #[test]

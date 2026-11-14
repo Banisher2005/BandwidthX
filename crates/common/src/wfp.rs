@@ -22,7 +22,7 @@ use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FWPM_CONDITION_ALE_APP_ID, FWPM_CONDITION_IP_REMOTE_PORT, FWPM_CONDITION_FLAGS,
     FWP_CONDITION_FLAG_IS_LOOPBACK,
 };
-use crate::{BANDWIDTHX_SUBLAYER_GUID, ExclusiveModeState};
+use crate::{BANDWIDTHX_SUBLAYER_GUID, ExclusiveModeState, TeardownReport};
 
 // Fixed GUID for BandwidthX
 fn parse_guid(s: &str) -> GUID {
@@ -359,7 +359,7 @@ impl HardenedWfpEngine {
         // 7. Terminate existing established TCP connections for unpermitted apps (AUDIT-03)
         // Exempt the target process, system kernel (0, 4), and running system services
         let system_exempt_pids = self.get_system_exempt_pids();
-        self.terminate_unpermitted_tcp_connections(target_pid, &system_exempt_pids);
+        let teardown_report = self.terminate_unpermitted_tcp_connections(target_pid, &system_exempt_pids);
 
         self.is_exclusive_active.store(true, Ordering::SeqCst);
         self.active_filter_count.store(added_ids.len() as u32, Ordering::SeqCst);
@@ -372,15 +372,20 @@ impl HardenedWfpEngine {
             target_app_name: Some(app_name.to_string()),
             target_exe_path: Some(exe_path.to_string()),
             allowed_exemptions: vec![
-                "svchost.exe".to_string(),
-                "System".to_string(),
-                "lsass.exe".to_string(),
-                "services.exe".to_string(),
+                "svchost.exe (Core System Services)".to_string(),
+                "System (Kernel PID 4)".to_string(),
+                "lsass.exe (Local Security Authority)".to_string(),
+                "services.exe (Service Controller)".to_string(),
+                "DNS (UDP/TCP Port 53)".to_string(),
+                "DHCPv4 (UDP Ports 67, 68)".to_string(),
+                "DHCPv6 (UDP Ports 546, 547)".to_string(),
+                "Loopback (127.0.0.1, ::1)".to_string(),
             ],
             restricted_apps_count: 50,
-            allowed_apps_count: 4,
+            allowed_apps_count: 8,
             activated_at: Some(chrono::Local::now().to_rfc3339()),
             last_error: None,
+            teardown_report: Some(teardown_report),
         };
 
         *self.exclusive_state.lock() = state.clone();
@@ -416,9 +421,10 @@ impl HardenedWfpEngine {
 
     /// Terminates established TCP sockets for unpermitted processes using SetTcpEntry.
     /// Strictly preserves target application sockets, system kernel, and exempt services.
-    /// Returns (ipv4_terminated_count, ipv6_unmanaged_count).
-    pub fn terminate_unpermitted_tcp_connections(&self, permitted_pid: u32, exempt_pids: &[u32]) -> (usize, usize) {
+    /// Returns TeardownReport surfacing terminated, failed, and unmanaged IPv6 counts.
+    pub fn terminate_unpermitted_tcp_connections(&self, permitted_pid: u32, exempt_pids: &[u32]) -> TeardownReport {
         let mut ipv4_terminated = 0;
+        let mut ipv4_failed = 0;
         let mut ipv6_unmanaged = 0;
 
         unsafe {
@@ -451,8 +457,15 @@ impl HardenedWfpEngine {
                             kill_row.dwLocalPort = row.local_port;
                             kill_row.dwRemoteAddr = row.remote_addr;
                             kill_row.dwRemotePort = row.remote_port;
-                            if SetTcpEntry(&kill_row) == 0 {
+                            let res = SetTcpEntry(&kill_row);
+                            if res == 0 {
                                 ipv4_terminated += 1;
+                            } else {
+                                eprintln!(
+                                    "Failed to terminate unpermitted IPv4 TCP connection for PID {}: error code {}",
+                                    row.owning_pid, res
+                                );
+                                ipv4_failed += 1;
                             }
                         }
                     }
@@ -480,7 +493,12 @@ impl HardenedWfpEngine {
             }
         }
 
-        (ipv4_terminated, ipv6_unmanaged)
+        TeardownReport {
+            ipv4_terminated,
+            ipv4_failed,
+            ipv6_unmanaged,
+            ipv6_notice: "IPv6 established connections cannot currently be forcefully terminated through the user-mode IP Helper path; ALE filters block subsequent packet transactions.".to_string(),
+        }
     }
 
     /// Block a specific application executable

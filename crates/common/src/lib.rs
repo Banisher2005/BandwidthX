@@ -49,6 +49,14 @@ pub struct NetworkRule {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeardownReport {
+    pub ipv4_terminated: usize,
+    pub ipv4_failed: usize,
+    pub ipv6_unmanaged: usize,
+    pub ipv6_notice: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExclusiveModeState {
     pub is_active: bool,
     pub target_pid: Option<u32>,
@@ -60,6 +68,8 @@ pub struct ExclusiveModeState {
     pub allowed_apps_count: usize,
     pub activated_at: Option<String>,
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub teardown_report: Option<TeardownReport>,
 }
 
 impl Default for ExclusiveModeState {
@@ -80,6 +90,7 @@ impl Default for ExclusiveModeState {
             allowed_apps_count: 0,
             activated_at: None,
             last_error: None,
+            teardown_report: None,
         }
     }
 }
