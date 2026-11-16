@@ -1,0 +1,55 @@
+name: Build and publish Windows installer
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows-release:
+    name: Build BandwidthX Windows setup
+    runs-on: windows-latest
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Set up stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Build privileged Windows service
+        run: cargo build --release -p bandwidthx-service
+      - name: Stage service binary for the installer
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force src-tauri/resources | Out-Null
+          Copy-Item target/release/bandwidthx-service.exe src-tauri/resources/bandwidthx-service.exe -Force
+          if (!(Test-Path src-tauri/resources/bandwidthx-service.exe)) { throw "The BandwidthX service binary was not staged." }
+      - name: Build NSIS setup executable
+        run: npx tauri build --bundles nsis
+      - name: Verify installer output
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          if (!$installer) { throw "Tauri did not produce a Windows setup executable." }
+          Write-Host "Installer ready: $($installer.FullName) ($($installer.Length) bytes)"
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v2.3.0
+          name: BandwidthX v2.3.0
+          target_commitish: main
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: target/release/bundle/nsis/*-setup.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

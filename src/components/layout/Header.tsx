@@ -26,7 +26,7 @@ export const Header: React.FC<HeaderProps> = ({
             <h1 className="text-lg font-bold tracking-tight text-[#EDF5F0] flex items-center gap-2">
               BandwidthX
               <span className="text-[10px] uppercase font-mono px-1.5 py-0.5 rounded bg-[#192223] text-[#57C7B5] border border-[#57C7B5]/30">
-                PRO v1.0
+                DESKTOP v2.3.0
               </span>
             </h1>
             <p className="text-xs text-[#91A39A] font-medium tracking-wide">
@@ -44,6 +44,16 @@ export const Header: React.FC<HeaderProps> = ({
             <span>EXCLUSIVE MODE: {exclusiveState.target_app_name}</span>
           </div>
         )}
+
+        {/* Authoritative service connection state */}
+        <div className={`flex items-center space-x-1.5 px-2.5 py-1 rounded border text-xs font-mono ${
+          serviceStatus.is_service_connected
+            ? 'bg-[#91DB79]/10 border-[#91DB79]/30 text-[#91DB79]'
+            : 'bg-[#EF6B70]/10 border-[#EF6B70]/30 text-[#EF6B70]'
+        }`}>
+          <span className={`w-1.5 h-1.5 rounded-full ${serviceStatus.is_service_connected ? 'bg-[#91DB79]' : 'bg-[#EF6B70]'}`}></span>
+          <span>{serviceStatus.is_service_connected ? 'SERVICE ONLINE' : 'SERVICE OFFLINE'}</span>
+        </div>
 
         {/* Elevated privilege badge */}
         {serviceStatus.is_elevated && (

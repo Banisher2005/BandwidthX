@@ -37,7 +37,7 @@ export function App() {
     detected_applications: 0,
     adapter_name: 'Detecting...',
     adapter_type: 'Unknown',
-    is_connected: true,
+    is_connected: false,
   });
 
   const [processes, setProcesses] = useState<ProcessNetworkInfo[]>([]);
@@ -54,12 +54,12 @@ export function App() {
   });
 
   const [serviceStatus, setServiceStatus] = useState<ServiceStatus>({
-    is_running: true,
-    is_elevated: true,
-    is_service_connected: true,
+    is_running: false,
+    is_elevated: false,
+    is_service_connected: false,
     exclusive_mode_active: false,
     active_filter_count: 0,
-    version: '1.0.0',
+    version: '2.3.0',
   });
 
   const [rules, setRules] = useState<NetworkRule[]>([]);

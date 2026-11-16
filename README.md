@@ -8,6 +8,10 @@ Its defining feature is **EXCLUSIVE MODE**: Select one running application to gr
 
 ---
 
+## Download & Install (Windows)
+
+Download the Windows setup executable from the [latest GitHub Release](https://github.com/Banisher2005/BandwidthX/releases/latest). The installer registers and starts the privileged BandwidthX service automatically; no manual service commands or development toolchain are required. See [docs/INSTALLATION.md](docs/INSTALLATION.md) for installation, UAC, and uninstall details.
+
 ## Key Features
 
 - **Exclusive Internet Mode**: Prioritize a game, streaming app, or critical workflow. All other applications are restricted at the WFP ALE layer without disrupting essential system networking.
