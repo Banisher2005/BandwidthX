@@ -26,7 +26,8 @@ use windows_sys::Win32::System::Services::{
     SERVICE_TABLE_ENTRYW, SERVICE_STATUS_HANDLE,
     SC_MANAGER_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START,
     SERVICE_ERROR_NORMAL, SERVICE_ALL_ACCESS, SERVICE_STOP,
-    SERVICE_CONTROL_STOP, SERVICE_CONTROL_SHUTDOWN, SERVICE_STATUS, SERVICE_STATUS_PROCESS, SC_STATUS_PROCESS_INFO,
+    SERVICE_CONTROL_STOP, SERVICE_CONTROL_SHUTDOWN, SERVICE_CONTROL_INTERROGATE,
+    SERVICE_STATUS, SERVICE_STATUS_PROCESS, SC_STATUS_PROCESS_INFO,
     SERVICE_STOPPED, SERVICE_RUNNING, SERVICE_START_PENDING, SERVICE_STOP_PENDING,
     SERVICE_ACCEPT_STOP, SERVICE_ACCEPT_SHUTDOWN,
     ChangeServiceConfig2W, SERVICE_CONFIG_FAILURE_ACTIONS, SERVICE_FAILURE_ACTIONSW,
@@ -96,6 +97,9 @@ unsafe extern "system" fn service_control_handler(
                 let _ = tx.send(());
             }
 
+            0 // NO_ERROR returned immediately to SCM
+        }
+        SERVICE_CONTROL_INTERROGATE => {
             0 // NO_ERROR returned immediately to SCM
         }
         _ => 120, // ERROR_CALL_NOT_IMPLEMENTED
@@ -965,7 +969,6 @@ fn start_service() -> Result<(), String> {
         }
 
         let res = StartServiceW(service, 0, std::ptr::null_mut());
-        let err = std::io::Error::last_os_error();
         CloseServiceHandle(service);
         CloseServiceHandle(scm);
 
@@ -973,7 +976,13 @@ fn start_service() -> Result<(), String> {
             println!("✔ BandwidthX Service started.");
             Ok(())
         } else {
-            Err(format!("Failed to start service: {}", err))
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(1056) {
+                println!("✔ BandwidthX Service is already running.");
+                Ok(())
+            } else {
+                Err(format!("Failed to start service: {}", err))
+            }
         }
     }
 }
@@ -995,7 +1004,6 @@ fn stop_service() -> Result<(), String> {
 
         let mut status: SERVICE_STATUS = std::mem::zeroed();
         let res = ControlService(service, SERVICE_CONTROL_STOP, &mut status);
-        let err = std::io::Error::last_os_error();
         CloseServiceHandle(service);
         CloseServiceHandle(scm);
 
@@ -1003,7 +1011,13 @@ fn stop_service() -> Result<(), String> {
             println!("✔ BandwidthX Service stopped.");
             Ok(())
         } else {
-            Err(format!("Failed to stop service: {}", err))
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(1062) {
+                println!("✔ BandwidthX Service is already stopped.");
+                Ok(())
+            } else {
+                Err(format!("Failed to stop service: {}", err))
+            }
         }
     }
 }
