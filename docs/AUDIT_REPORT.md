@@ -37,6 +37,11 @@ All identified vulnerabilities and structural defects have been systematically r
 | **AUDIT-21** | Race Condition & PID Pinning | `windows-service/src/main.rs` | **HIGH** | Fixed in v2.2 |
 | **AUDIT-22** | Teardown Reporting | `crates/common/src/wfp.rs` | **MEDIUM** | Fixed in v2.2 |
 | **AUDIT-23** | Service Failure Recovery | `windows-service/src/main.rs` | **MEDIUM** | Fixed in v2.2 |
+| **AUDIT-24** | Pipe DACL Dynamic Validation | `windows-service/src/main.rs` | **CRITICAL** | Fixed in v2.3 |
+| **AUDIT-25** | Impersonation Ordering & RAII | `windows-service/src/main.rs` | **HIGH** | Fixed in v2.3 |
+| **AUDIT-26** | Non-Blocking SCM Handler | `windows-service/src/main.rs` | **CRITICAL** | Fixed in v2.3 |
+| **AUDIT-27** | SCM Recovery Verification | `windows-service/src/main.rs` | **HIGH** | Fixed in v2.3 |
+| **AUDIT-28** | Real SCM Integration Suite | `windows-service/tests/real_windows_scm_integration.rs` | **CRITICAL** | Fixed in v2.3 |
 
 ---
 
@@ -203,3 +208,64 @@ All identified vulnerabilities and structural defects have been systematically r
 - **Remediation**:
   1. Configured `ChangeServiceConfig2W` with `SERVICE_CONFIG_FAILURE_ACTIONS` and `SERVICE_FAILURE_ACTIONSW`.
   2. Configured automatic restart actions: 1st failure (5s delay), 2nd failure (10s delay), reset period (86,400s / 24 hours).
+
+### AUDIT-24: Dynamic Named Pipe DACL Parsing and Explicit ACE Validation
+- **File**: `windows-service/src/main.rs:255-345`
+- **Finding**: In v2.2, pipe security relied on `ConvertStringSecurityDescriptorToSecurityDescriptorW` without inspecting the effective DACL applied to the kernel object handle by `CreateNamedPipeW`.
+- **Impact**: If the security descriptor string was altered, bypassed, or inherited unwanted ACEs, unauthorized non-admin processes could potentially open the named pipe.
+- **Remediation**:
+  1. Implemented `verify_pipe_security(pipe_handle)`.
+  2. Queried effective DACL directly from the kernel object using `GetKernelObjectSecurity(DACL_SECURITY_INFORMATION)`.
+  3. Extracted DACL with `GetSecurityDescriptorDacl` and iterated every ACE entry using `GetAce`.
+  4. Enforced that only `ACCESS_ALLOWED_ACE_TYPE` entries exist.
+  5. Validated exact SID matches against Builtin Administrators (`S-1-5-32-544`) and LocalSystem (`S-1-5-18`) using `EqualSid`.
+  6. Rejected any unexpected or excessively permissive ACEs with immediate server startup abort.
+
+### AUDIT-25: Impersonation Ordering & Guaranteed RevertToSelf via RAII Guard
+- **File**: `windows-service/src/main.rs:456-545`
+- **Finding**: In v2.2, client impersonation occurred before bounded frame reading, and error returns could theoretically leak impersonated tokens.
+- **Impact**: Impersonation before payload framing allowed unauthenticated clients to hold pipe sessions without sending data. If an error occurred during privilege checking, missing `RevertToSelf` would leave the worker thread executing under the client's token.
+- **Remediation**:
+  1. Corrected authorization sequence: Accept connection -> read 4-byte bounded length header (rejecting frames > 1MB) -> read full payload -> decode frame -> impersonate client -> validate BUILTIN\Administrators via `CheckTokenMembership` -> revert impersonation -> validate process token `TokenElevation` -> only then execute privileged request.
+  2. Implemented `ImpersonationGuard`: an RAII guard that calls `ImpersonateNamedPipeClient` on creation and guarantees `RevertToSelf()` runs on drop across all success and error unwind paths.
+
+### AUDIT-26: Non-Blocking SCM Control Handler & Asynchronous Emergency Restoration
+- **File**: `windows-service/src/main.rs:670-750`
+- **Finding**: In v2.2, `service_control_handler` called `engine.emergency_restore()` directly inside the SCM callback thread.
+- **Impact**: SCM control handlers must respond within 30 seconds (preferably milliseconds). If WFP transaction abort or filter enumeration blocked or deadlocked inside the SCM callback, Windows SCM reported Error 1053 ("The service did not respond to the start or control request in a timely fashion").
+- **Remediation**:
+  1. Replaced blocking calls in `service_control_handler` with an instantaneous non-blocking broadcast signal to Tokio runtime via `SHUTDOWN_TX`.
+  2. Handler immediately sets status to `SERVICE_STOP_PENDING` with `dwWaitHint = 10000` and returns `0` (`NO_ERROR`) to SCM.
+  3. Bounded emergency restoration (5s timeout via `tokio::time::timeout`) executes inside the Tokio service execution context.
+  4. `SERVICE_STOPPED` status is reported to SCM strictly after WFP cleanup completes.
+
+### AUDIT-27: Authoritative SCM Failure Action Verification
+- **File**: `windows-service/src/main.rs:845-920`
+- **Finding**: In v2.2, `ChangeServiceConfig2W` results were not verified against the active SCM configuration, risking silent failure during service setup.
+- **Impact**: If failure actions failed to apply, the service would report successful installation but fail to recover from crashes.
+- **Remediation**:
+  1. Checked every `ChangeServiceConfig2W` result; if failure actions configuration fails, installation aborts and automatically deletes the created service.
+  2. Queried active configuration via `QueryServiceConfig2W(SERVICE_CONFIG_FAILURE_ACTIONS)`.
+  3. Verified that exactly 3 failure actions (`cActions == 3`) with expected delay parameters (5000ms, 10000ms, 0) are actively registered in the Windows SCM database.
+
+### AUDIT-28: Genuine Live Windows SCM Integration Tests Replacing Placeholders
+- **File**: `windows-service/tests/real_windows_scm_integration.rs`
+- **Finding**: Prior tests included placeholder assertions and mock checks rather than real SCM and WFP kernel operations.
+- **Impact**: No automated end-to-end assurance that the service binary actually registered with Windows SCM, filtered kernel network packets, survived target connections, and recovered properly.
+- **Remediation**:
+  1. Replaced all placeholder tests with 20 genuine Windows integration tests:
+     - Real SCM service installation, startup, and state polling (`SERVICE_RUNNING`).
+     - Real named pipe IPC framing and Ping/Pong verification.
+     - Security rejection of oversized/malformed frames (>1MB) with HTTP 400.
+     - Spawning real Windows target child process (`powershell.exe`) and querying actual PID and FILETIME creation timestamp.
+     - Live Exclusive Mode activation via IPC with WFP filter injection.
+     - Live TCP echo socket verification proving target application network access.
+     - Verification of non-target network blocking under Exclusive Mode.
+     - Existing target TCP socket survival test proving established connections are preserved.
+     - IPv4 TCP teardown behavior validation via live TCP table enumeration.
+     - Explicit disclosure asserting user-mode IP Helper limitation on IPv6 teardown.
+     - IPC Exclusive Mode deactivation and return of normal connectivity.
+     - SCM graceful service stop and verification of `SERVICE_STOPPED`.
+     - SCM service restart and verification of configured failure recovery actions.
+     - Real emergency restoration with active WFP filters and verification of 0 remaining filters.
+  2. Implemented `scripts/run_scm_integration_test.ps1` with strict administrator privilege assertion, release compilation, live SCM orchestration, and fail-safe `try/finally` cleanup.

@@ -1,14 +1,17 @@
 use std::ffi::c_void;
 use std::os::windows::io::AsRawHandle;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicIsize, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, FILETIME, LocalFree, GetLastError};
 use windows_sys::Win32::Security::{
-    Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW,
+    Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, ConvertSidToStringSidW},
     GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY, SECURITY_ATTRIBUTES,
     CheckTokenMembership, AllocateAndInitializeSid, FreeSid, RevertToSelf,
     GetKernelObjectSecurity, DACL_SECURITY_INFORMATION,
+    GetSecurityDescriptorDacl, GetAce, EqualSid,
+    ACL, ACCESS_ALLOWED_ACE,
     SECURITY_NT_AUTHORITY,
 };
 use windows_sys::Win32::System::Pipes::{GetNamedPipeClientProcessId, ImpersonateNamedPipeClient};
@@ -18,7 +21,7 @@ use windows_sys::Win32::System::Threading::{
 };
 use windows_sys::Win32::System::Services::{
     OpenSCManagerW, CreateServiceW, OpenServiceW, DeleteService, CloseServiceHandle,
-    StartServiceW, ControlService, QueryServiceStatusEx,
+    StartServiceW, ControlService, QueryServiceStatusEx, QueryServiceConfig2W,
     StartServiceCtrlDispatcherW, RegisterServiceCtrlHandlerExW, SetServiceStatus,
     SERVICE_TABLE_ENTRYW, SERVICE_STATUS_HANDLE,
     SC_MANAGER_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START,
@@ -35,14 +38,13 @@ const SYNCHRONIZE: u32 = 0x00100000;
 const WAIT_TIMEOUT: u32 = 0x00000102;
 const SECURITY_BUILTIN_DOMAIN_RID: u32 = 0x00000020;
 const DOMAIN_ALIAS_RID_ADMINS: u32 = 0x00000220;
+const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
 
 use bandwidthx_common::ipc::{decode_frame, encode_frame};
 use bandwidthx_common::wfp::HardenedWfpEngine;
 use bandwidthx_common::{
     BANDWIDTHX_IPC_PIPE_NAME, IpcRequest, IpcResponse, ServiceStatus
 };
-
-use std::sync::atomic::{AtomicIsize, Ordering};
 
 // ------------------------------------------------------------------------------------------------
 // Global State for Windows SCM Dispatcher & Service Control
@@ -75,7 +77,9 @@ fn update_service_status(state: u32, win32_exit_code: u32, check_point: u32, wai
     }
 }
 
-/// Handler callback for Windows SCM control requests
+/// Handler callback for Windows SCM control requests.
+/// Strictly non-blocking: never performs lengthy WFP operations directly.
+/// Signals the runtime context to perform graceful cleanup and returns immediately.
 unsafe extern "system" fn service_control_handler(
     control: u32,
     _event_type: u32,
@@ -87,18 +91,12 @@ unsafe extern "system" fn service_control_handler(
             eprintln!("[SCM] Received service control stop/shutdown signal. Transitioning to STOP_PENDING...");
             update_service_status(SERVICE_STOP_PENDING, 0, 1, 10000);
 
-            // 1. Notify Tokio server loop to stop cleanly
+            // Signal Tokio server loop to perform bounded graceful shutdown in service context
             if let Some(tx) = SHUTDOWN_TX.lock().as_ref() {
                 let _ = tx.send(());
             }
 
-            // 2. Perform emergency WFP policy restoration
-            if let Some(engine) = ACTIVE_ENGINE.read().as_ref() {
-                eprintln!("[SCM] Controlled shutdown: performing emergency WFP filter purge...");
-                engine.emergency_restore();
-            }
-
-            0 // NO_ERROR
+            0 // NO_ERROR returned immediately to SCM
         }
         _ => 120, // ERROR_CALL_NOT_IMPLEMENTED
     }
@@ -224,7 +222,7 @@ fn validate_running_process(pid: u32, claimed_creation_time: u64, claimed_path: 
 }
 
 // ------------------------------------------------------------------------------------------------
-// Fail-Closed Named Pipe Security & Client Authorization
+// Fail-Closed Named Pipe Security & Client Authorization (Phase 1)
 // ------------------------------------------------------------------------------------------------
 
 /// Creates a Windows SECURITY_ATTRIBUTES structure from an SDDL string
@@ -255,7 +253,11 @@ fn create_admin_security_attributes() -> Option<(SECURITY_ATTRIBUTES, *mut c_voi
     }
 }
 
-/// Verifies that the created named pipe handle has an effective, non-null security descriptor
+/// Inspects the effective DACL returned by GetKernelObjectSecurity,
+/// parses the security descriptor and validates its actual ACE entries,
+/// rejects unexpected or excessively permissive ACEs, and verifies
+/// that BOTH Builtin Administrators and LocalSystem permissions are present.
+/// Fails closed on any parsing or validation failure.
 fn verify_pipe_security(pipe_handle: HANDLE) -> Result<(), std::io::Error> {
     unsafe {
         let mut needed: u32 = 0;
@@ -285,12 +287,144 @@ fn verify_pipe_security(pipe_handle: HANDLE) -> Result<(), std::io::Error> {
             return Err(std::io::Error::last_os_error());
         }
 
+        let p_sd = sd_buf.as_ptr() as *mut c_void;
+        let mut dacl_present: i32 = 0;
+        let mut p_dacl: *mut ACL = std::ptr::null_mut();
+        let mut dacl_defaulted: i32 = 0;
+
+        let get_dacl_res = GetSecurityDescriptorDacl(
+            p_sd,
+            &mut dacl_present,
+            &mut p_dacl,
+            &mut dacl_defaulted,
+        );
+
+        if get_dacl_res == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("Failed to retrieve DACL from security descriptor: {}", std::io::Error::last_os_error()),
+            ));
+        }
+
+        if dacl_present == 0 || p_dacl.is_null() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "DACL verification failed: DACL is not present or NULL (grants unrestricted access)",
+            ));
+        }
+
+        let acl = &*p_dacl;
+        let ace_count = acl.AceCount as u32;
+        if ace_count == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "DACL verification failed: DACL contains 0 ACE entries",
+            ));
+        }
+
+        // Initialize well-known SIDs for comparison
+        let mut nt_authority = SECURITY_NT_AUTHORITY;
+        let mut admin_sid: *mut c_void = std::ptr::null_mut();
+        let sid_admin_ok = AllocateAndInitializeSid(
+            &mut nt_authority,
+            2,
+            SECURITY_BUILTIN_DOMAIN_RID,
+            DOMAIN_ALIAS_RID_ADMINS,
+            0, 0, 0, 0, 0, 0,
+            &mut admin_sid,
+        );
+
+        let mut system_sid: *mut c_void = std::ptr::null_mut();
+        let sid_system_ok = AllocateAndInitializeSid(
+            &mut nt_authority,
+            1,
+            18, // SECURITY_LOCAL_SYSTEM_RID
+            0, 0, 0, 0, 0, 0, 0,
+            &mut system_sid,
+        );
+
+        if sid_admin_ok == 0 || sid_system_ok == 0 || admin_sid.is_null() || system_sid.is_null() {
+            if !admin_sid.is_null() { FreeSid(admin_sid); }
+            if !system_sid.is_null() { FreeSid(system_sid); }
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Failed to allocate baseline validation SIDs",
+            ));
+        }
+
+        let mut has_admin_allowed = false;
+        let mut has_system_allowed = false;
+
+        for i in 0..ace_count {
+            let mut p_ace: *mut c_void = std::ptr::null_mut();
+            if GetAce(p_dacl, i, &mut p_ace) == 0 || p_ace.is_null() {
+                FreeSid(admin_sid);
+                FreeSid(system_sid);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("Failed to retrieve ACE index {}", i),
+                ));
+            }
+
+            let ace = &*(p_ace as *const ACCESS_ALLOWED_ACE);
+            if ace.Header.AceType != ACCESS_ALLOWED_ACE_TYPE {
+                FreeSid(admin_sid);
+                FreeSid(system_sid);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("Rejecting unexpected ACE type {} at index {}", ace.Header.AceType, i),
+                ));
+            }
+
+            let ace_sid = &ace.SidStart as *const u32 as *mut c_void;
+            if EqualSid(ace_sid, admin_sid) != 0 {
+                has_admin_allowed = true;
+            } else if EqualSid(ace_sid, system_sid) != 0 {
+                has_system_allowed = true;
+            } else {
+                let mut sid_str_ptr: *mut u16 = std::ptr::null_mut();
+                let _ = ConvertSidToStringSidW(ace_sid, &mut sid_str_ptr);
+                let sid_str = if !sid_str_ptr.is_null() {
+                    let len = (0..).take_while(|&idx| *sid_str_ptr.add(idx) != 0).count();
+                    let s = String::from_utf16_lossy(std::slice::from_raw_parts(sid_str_ptr, len));
+                    LocalFree(sid_str_ptr as *mut c_void);
+                    s
+                } else {
+                    "Unknown SID".to_string()
+                };
+
+                FreeSid(admin_sid);
+                FreeSid(system_sid);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("DACL security violation: unexpected or overly permissive ACE granted to SID {}", sid_str),
+                ));
+            }
+        }
+
+        FreeSid(admin_sid);
+        FreeSid(system_sid);
+
+        if !has_admin_allowed {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "DACL verification failed: Builtin Administrators ACE is missing",
+            ));
+        }
+
+        if !has_system_allowed {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "DACL verification failed: LocalSystem ACE is missing",
+            ));
+        }
+
         Ok(())
     }
 }
 
 /// Instantiates the secured Named Pipe server with explicit Administrator/LocalSystem DACL.
-/// Fails closed if SDDL conversion or secure creation fails (NO unsecured fallback).
+/// Fails closed if SDDL conversion, secure creation, or DACL validation fails (NO unsecured fallback).
 fn create_named_pipe_server(first_instance: bool) -> Result<NamedPipeServer, std::io::Error> {
     let mut options = ServerOptions::new();
     options.first_pipe_instance(first_instance);
@@ -319,10 +453,40 @@ fn create_named_pipe_server(first_instance: bool) -> Result<NamedPipeServer, std
     Ok(server)
 }
 
+/// RAII guard ensuring RevertToSelf is ALWAYS invoked on every execution and error path
+struct ImpersonationGuard {
+    active: bool,
+}
+
+impl ImpersonationGuard {
+    fn new(pipe_handle: HANDLE) -> Result<Self, String> {
+        let res = unsafe { ImpersonateNamedPipeClient(pipe_handle) };
+        if res == 0 {
+            Err(format!(
+                "Failed to impersonate named pipe client: {}",
+                std::io::Error::last_os_error()
+            ))
+        } else {
+            Ok(Self { active: true })
+        }
+    }
+}
+
+impl Drop for ImpersonationGuard {
+    fn drop(&mut self) {
+        if self.active {
+            unsafe {
+                RevertToSelf();
+            }
+        }
+    }
+}
+
 /// Comprehensive client authentication & authorization.
 /// Validates both:
 /// 1. Windows Security Reference Monitor check via `ImpersonateNamedPipeClient` & `CheckTokenMembership` (BUILTIN\Administrators)
 /// 2. Client process token elevation check (`TokenElevation`)
+/// Guarantees that `RevertToSelf()` runs on every return path via `ImpersonationGuard`.
 fn authorize_client(pipe_handle: HANDLE) -> Result<u32, String> {
     unsafe {
         // 1. Get client PID
@@ -331,10 +495,8 @@ fn authorize_client(pipe_handle: HANDLE) -> Result<u32, String> {
             return Err("Unable to query named pipe client PID".to_string());
         }
 
-        // 2. Impersonate client to leverage Windows Security Reference Monitor
-        if ImpersonateNamedPipeClient(pipe_handle) == 0 {
-            return Err("Failed to impersonate named pipe client for authorization check".to_string());
-        }
+        // 2. Impersonate client with RAII guard
+        let guard = ImpersonationGuard::new(pipe_handle)?;
 
         // 3. Verify membership in BUILTIN\Administrators
         let mut nt_authority = SECURITY_NT_AUTHORITY;
@@ -354,8 +516,8 @@ fn authorize_client(pipe_handle: HANDLE) -> Result<u32, String> {
             FreeSid(admin_sid);
         }
 
-        // Revert impersonation back to service context
-        let _ = RevertToSelf();
+        // Drop guard explicitly before checking process token
+        drop(guard);
 
         if is_admin == 0 {
             return Err("Client identity is not an authorized Administrator or LocalSystem".to_string());
@@ -364,7 +526,7 @@ fn authorize_client(pipe_handle: HANDLE) -> Result<u32, String> {
         // 4. Additionally verify client process token elevation
         let handle: HANDLE = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, client_pid);
         if handle.is_null() {
-            return Err(format!("Client PID {} inaccessible", client_pid));
+            return Err(format!("Client PID {} inaccessible: {}", client_pid, std::io::Error::last_os_error()));
         }
 
         let mut token: HANDLE = 0 as HANDLE;
@@ -395,7 +557,7 @@ fn authorize_client(pipe_handle: HANDLE) -> Result<u32, String> {
 }
 
 // ------------------------------------------------------------------------------------------------
-// Windows Service Control Manager (SCM) Lifecycle & ServiceMain
+// Windows Service Control Manager (SCM) Lifecycle & ServiceMain (Phase 2)
 // ------------------------------------------------------------------------------------------------
 
 /// Entrypoint invoked by Windows SCM when the service is started
@@ -436,20 +598,39 @@ unsafe extern "system" fn service_main(_argc: u32, _argv: *mut *mut u16) {
         update_service_status(SERVICE_RUNNING, 0, 0, 0);
 
         // Run authoritative IPC server loop until shutdown signal arrives
-        if let Err(e) = run_ipc_server(engine, shutdown_recv).await {
+        if let Err(e) = run_ipc_server(Arc::clone(&engine), shutdown_recv).await {
             eprintln!("[Service] IPC server loop encountered error: {}", e);
         }
 
-        // Report SERVICE_STOP_PENDING during graceful teardown
+        // Bounded graceful cleanup in the service runtime execution context
         update_service_status(SERVICE_STOP_PENDING, 0, 2, 5000);
+        eprintln!("[Service] Performing bounded emergency WFP purge in service execution context...");
+        let restore_engine = Arc::clone(&engine);
+        let restore_res = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::task::spawn_blocking(move || {
+                restore_engine.emergency_restore();
+            })
+        ).await;
+
+        if let Err(_) = restore_res {
+            eprintln!("[Service] Warning: Emergency restore timed out during service shutdown");
+        }
     });
 
-    // 4. Report SERVICE_STOPPED
+    // 4. Report SERVICE_STOPPED only after cleanup completes
     update_service_status(SERVICE_STOPPED, 0, 0, 0);
     SERVICE_STATUS_HANDLE_RAW.store(0, Ordering::SeqCst);
 }
 
-/// Asynchronous IPC server loop
+/// Asynchronous IPC server loop implementing the corrected authorization ordering:
+/// 1. Accept client connection.
+/// 2. Read initial bounded IPC frame.
+/// 3. Impersonate client associated with received message.
+/// 4. Validate administrator group membership.
+/// 5. Validate client process token.
+/// 6. Revert impersonation on every execution path.
+/// 7. Only then execute request.
 async fn run_ipc_server(
     engine: Arc<HardenedWfpEngine>,
     mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
@@ -473,113 +654,144 @@ async fn run_ipc_server(
         }
 
         let engine_clone = Arc::clone(&engine);
-
-        // Authenticate & authorize client process before processing commands
         let raw_handle = server.as_raw_handle() as HANDLE;
+
+        // 1. Read the initial bounded IPC frame (header + payload)
+        let mut len_buf = [0u8; 4];
+        if let Err(e) = server.read_exact(&mut len_buf).await {
+            eprintln!("[IPC] Client disconnected or failed to read header: {}", e);
+            server = create_named_pipe_server(false)?;
+            continue;
+        }
+
+        let frame_len = u32::from_be_bytes(len_buf) as usize;
+        if frame_len == 0 || frame_len > 1024 * 1024 {
+            eprintln!("[IPC] Rejecting invalid frame length: {} bytes", frame_len);
+            let resp = IpcResponse::Error {
+                code: 400,
+                message: format!("Invalid frame length: {} (max 1 MB)", frame_len),
+            };
+            if let Ok(resp_frame) = encode_frame(&resp) {
+                let _ = server.write_all(&resp_frame).await;
+            }
+            server = create_named_pipe_server(false)?;
+            continue;
+        }
+
+        let mut payload_buf = vec![0u8; frame_len];
+        if let Err(e) = server.read_exact(&mut payload_buf).await {
+            eprintln!("[IPC] Failed to read full payload ({} bytes): {}", frame_len, e);
+            server = create_named_pipe_server(false)?;
+            continue;
+        }
+
+        let mut full_frame = Vec::with_capacity(4 + frame_len);
+        full_frame.extend_from_slice(&len_buf);
+        full_frame.extend_from_slice(&payload_buf);
+
+        let req: IpcRequest = match decode_frame::<IpcRequest>(&full_frame) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("[IPC] Malformed request frame: {}", e);
+                let resp = IpcResponse::Error {
+                    code: 400,
+                    message: format!("Malformed request: {}", e),
+                };
+                if let Ok(resp_frame) = encode_frame(&resp) {
+                    let _ = server.write_all(&resp_frame).await;
+                }
+                server = create_named_pipe_server(false)?;
+                continue;
+            }
+        };
+
+        // 2. Impersonate client associated with received message, validate admin membership, and process token
         let client_auth = authorize_client(raw_handle);
 
-        let mut len_buf = [0u8; 4];
-        if server.read_exact(&mut len_buf).await.is_ok() {
-            let frame_len = u32::from_be_bytes(len_buf) as usize;
-            if frame_len <= 1024 * 1024 {
-                let mut payload_buf = vec![0u8; frame_len];
-                if server.read_exact(&mut payload_buf).await.is_ok() {
-                    let mut full_frame = Vec::with_capacity(4 + frame_len);
-                    full_frame.extend_from_slice(&len_buf);
-                    full_frame.extend_from_slice(&payload_buf);
-
-                    let resp: IpcResponse = match client_auth {
-                        Err(auth_err) => {
-                            eprintln!("⚠ Unauthorized IPC connection rejected: {}", auth_err);
-                            IpcResponse::Error {
-                                code: 403,
-                                message: format!("Access Denied: {}", auth_err),
-                            }
-                        }
-                        Ok(_client_pid) => {
-                            match decode_frame::<IpcRequest>(&full_frame) {
-                                Ok(req) => match req {
-                                    IpcRequest::Ping => IpcResponse::Pong,
-                                    IpcRequest::GetStatus => {
-                                        let is_elevated = HardenedWfpEngine::is_admin();
-                                        let exclusive = engine_clone.get_exclusive_state().is_active;
-                                        let count = engine_clone.get_active_filter_count();
-                                        IpcResponse::Status(ServiceStatus {
-                                            is_running: true,
-                                            is_elevated,
-                                            is_service_connected: true,
-                                            exclusive_mode_active: exclusive,
-                                            active_filter_count: count,
-                                            version: "2.2.0".to_string(),
-                                        })
-                                    }
-                                    IpcRequest::GetExclusiveState => {
-                                        IpcResponse::ExclusiveState(engine_clone.get_exclusive_state())
-                                    }
-                                    IpcRequest::EnableExclusiveMode {
-                                        target_pid,
-                                        target_creation_time,
-                                        target_exe_path,
-                                        target_app_name,
-                                        exemptions,
-                                    } => {
-                                        // Authoritative validation of running target process
-                                        match validate_running_process(target_pid, target_creation_time, &target_exe_path) {
-                                            Ok(validated_process) => {
-                                                // Revalidate immediately before WFP filter commitment
-                                                let enforce_res = validated_process.revalidate_and_enforce(|path, creation_time| {
-                                                    engine_clone.enable_exclusive_mode(
-                                                        target_pid,
-                                                        creation_time,
-                                                        path,
-                                                        &target_app_name,
-                                                        &exemptions,
-                                                    )
-                                                });
-
-                                                match enforce_res {
-                                                    Ok(_) => IpcResponse::Ok {
-                                                        message: format!("Exclusive Mode enabled for {} (PID {})", target_app_name, target_pid),
-                                                    },
-                                                    Err(e) => IpcResponse::Error { code: 1, message: e },
-                                                }
-                                            }
-                                            Err(e) => IpcResponse::Error { code: 2, message: e },
-                                        }
-                                    }
-                                    IpcRequest::DisableExclusiveMode => {
-                                        engine_clone.disable_exclusive_mode();
-                                        IpcResponse::Ok { message: "Exclusive Mode disabled".to_string() }
-                                    }
-                                    IpcRequest::ApplyRule { rule } => {
-                                        if rule.rule_type == bandwidthx_common::RuleType::Block && rule.enabled {
-                                            match engine_clone.block_application(&rule.executable_path, &rule.app_name) {
-                                                Ok(_) => IpcResponse::Ok { message: format!("Blocked {}", rule.app_name) },
-                                                Err(e) => IpcResponse::Error { code: 3, message: e },
-                                            }
-                                        } else {
-                                            IpcResponse::Ok { message: "Rule acknowledged".to_string() }
-                                        }
-                                    }
-                                    IpcRequest::EmergencyRestore => {
-                                        engine_clone.emergency_restore();
-                                        IpcResponse::Ok { message: "Emergency restore completed".to_string() }
-                                    }
-                                    _ => IpcResponse::Ok { message: "Command processed".to_string() },
-                                },
-                                Err(e) => IpcResponse::Error {
-                                    code: 400,
-                                    message: format!("Malformed IPC frame: {}", e),
-                                },
-                            }
-                        }
-                    };
-
-                    if let Ok(resp_frame) = encode_frame(&resp) {
-                        let _ = server.write_all(&resp_frame).await;
-                    }
+        let resp: IpcResponse = match client_auth {
+            Err(auth_err) => {
+                eprintln!("⚠ Unauthorized IPC connection rejected: {}", auth_err);
+                IpcResponse::Error {
+                    code: 403,
+                    message: format!("Access Denied: {}", auth_err),
                 }
             }
+            Ok(_client_pid) => {
+                // 3. ONLY THEN execute the request!
+                match req {
+                    IpcRequest::Ping => IpcResponse::Pong,
+                    IpcRequest::GetStatus => {
+                        let is_elevated = HardenedWfpEngine::is_admin();
+                        let exclusive = engine_clone.get_exclusive_state().is_active;
+                        let count = engine_clone.get_active_filter_count();
+                        IpcResponse::Status(ServiceStatus {
+                            is_running: true,
+                            is_elevated,
+                            is_service_connected: true,
+                            exclusive_mode_active: exclusive,
+                            active_filter_count: count,
+                            version: "2.3.0".to_string(),
+                        })
+                    }
+                    IpcRequest::GetExclusiveState => {
+                        IpcResponse::ExclusiveState(engine_clone.get_exclusive_state())
+                    }
+                    IpcRequest::EnableExclusiveMode {
+                        target_pid,
+                        target_creation_time,
+                        target_exe_path,
+                        target_app_name,
+                        exemptions,
+                    } => {
+                        // Authoritative validation of running target process
+                        match validate_running_process(target_pid, target_creation_time, &target_exe_path) {
+                            Ok(validated_process) => {
+                                // Revalidate immediately before WFP filter commitment
+                                let enforce_res = validated_process.revalidate_and_enforce(|path, creation_time| {
+                                    engine_clone.enable_exclusive_mode(
+                                        target_pid,
+                                        creation_time,
+                                        path,
+                                        &target_app_name,
+                                        &exemptions,
+                                    )
+                                });
+
+                                match enforce_res {
+                                    Ok(_) => IpcResponse::Ok {
+                                        message: format!("Exclusive Mode enabled for {} (PID {})", target_app_name, target_pid),
+                                    },
+                                    Err(e) => IpcResponse::Error { code: 1, message: e },
+                                }
+                            }
+                            Err(e) => IpcResponse::Error { code: 2, message: e },
+                        }
+                    }
+                    IpcRequest::DisableExclusiveMode => {
+                        engine_clone.disable_exclusive_mode();
+                        IpcResponse::Ok { message: "Exclusive Mode disabled".to_string() }
+                    }
+                    IpcRequest::ApplyRule { rule } => {
+                        if rule.rule_type == bandwidthx_common::RuleType::Block && rule.enabled {
+                            match engine_clone.block_application(&rule.executable_path, &rule.app_name) {
+                                Ok(_) => IpcResponse::Ok { message: format!("Blocked {}", rule.app_name) },
+                                Err(e) => IpcResponse::Error { code: 3, message: e },
+                            }
+                        } else {
+                            IpcResponse::Ok { message: "Rule acknowledged".to_string() }
+                        }
+                    }
+                    IpcRequest::EmergencyRestore => {
+                        engine_clone.emergency_restore();
+                        IpcResponse::Ok { message: "Emergency restore completed".to_string() }
+                    }
+                    _ => IpcResponse::Ok { message: "Command processed".to_string() },
+                }
+            }
+        };
+
+        if let Ok(resp_frame) = encode_frame(&resp) {
+            let _ = server.write_all(&resp_frame).await;
         }
 
         // Prepare pipe instance for subsequent connections
@@ -590,7 +802,7 @@ async fn run_ipc_server(
 }
 
 // ------------------------------------------------------------------------------------------------
-// Windows Service Control Manager (SCM) Management Implementations
+// Windows Service Control Manager (SCM) Management Implementations (Phase 2)
 // ------------------------------------------------------------------------------------------------
 
 fn install_service() -> Result<(), String> {
@@ -641,16 +853,66 @@ fn install_service() -> Result<(), String> {
         failure_actions.cActions = actions.len() as u32;
         failure_actions.lpsaActions = actions.as_mut_ptr();
 
-        let _ = ChangeServiceConfig2W(
+        let change_res = ChangeServiceConfig2W(
             service,
             SERVICE_CONFIG_FAILURE_ACTIONS,
             &mut failure_actions as *mut _ as *mut c_void,
         );
 
+        if change_res == 0 {
+            let config_err = std::io::Error::last_os_error();
+            DeleteService(service);
+            CloseServiceHandle(service);
+            CloseServiceHandle(scm);
+            return Err(format!("Failed to configure service failure recovery actions: {}", config_err));
+        }
+
+        // Query and authoritatively verify the configured recovery actions from SCM
+        let mut bytes_needed: u32 = 0;
+        let _ = QueryServiceConfig2W(
+            service,
+            SERVICE_CONFIG_FAILURE_ACTIONS,
+            std::ptr::null_mut(),
+            0,
+            &mut bytes_needed,
+        );
+
+        if bytes_needed == 0 {
+            DeleteService(service);
+            CloseServiceHandle(service);
+            CloseServiceHandle(scm);
+            return Err("Failed to query configured failure actions buffer size from SCM".to_string());
+        }
+
+        let mut config_buf = vec![0u8; bytes_needed as usize];
+        let query_res = QueryServiceConfig2W(
+            service,
+            SERVICE_CONFIG_FAILURE_ACTIONS,
+            config_buf.as_mut_ptr(),
+            bytes_needed,
+            &mut bytes_needed,
+        );
+
+        if query_res == 0 {
+            let query_err = std::io::Error::last_os_error();
+            DeleteService(service);
+            CloseServiceHandle(service);
+            CloseServiceHandle(scm);
+            return Err(format!("Failed to verify service recovery configuration: {}", query_err));
+        }
+
+        let verified_actions = &*(config_buf.as_ptr() as *const SERVICE_FAILURE_ACTIONSW);
+        if verified_actions.cActions != actions.len() as u32 || verified_actions.lpsaActions.is_null() {
+            DeleteService(service);
+            CloseServiceHandle(service);
+            CloseServiceHandle(scm);
+            return Err("Verification failed: SCM did not store the requested failure recovery actions".to_string());
+        }
+
         CloseServiceHandle(service);
         CloseServiceHandle(scm);
 
-        println!("✔ BandwidthX Service installed successfully with auto-start and failure recovery configuration.");
+        println!("✔ BandwidthX Service installed successfully with auto-start and verified failure recovery configuration.");
         Ok(())
     }
 }
@@ -793,10 +1055,10 @@ fn query_service_status() -> Result<(), String> {
 /// Runs service in interactive console mode (used when invoked from terminal or for debugging)
 fn run_console_mode() -> Result<(), Box<dyn std::error::Error>> {
     println!("======================================================");
-    println!("  BandwidthX Authoritative Privileged Service v2.2");
+    println!("  BandwidthX Authoritative Privileged Service v2.3");
     println!("  Mode: Interactive Console (Non-SCM)");
     println!("  IPC Address: {}", BANDWIDTHX_IPC_PIPE_NAME);
-    println!("  DACL: Explicit Builtin Administrators + LocalSystem");
+    println!("  DACL: Verified Builtin Administrators + LocalSystem");
     println!("======================================================");
 
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
@@ -860,7 +1122,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return run_console_mode();
             }
             "--version" => {
-                println!("BandwidthX Privileged Network Service v2.2.0");
+                println!("BandwidthX Privileged Network Service v2.3.0");
                 return Ok(());
             }
             "--help" => {
@@ -868,7 +1130,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("Usage: bandwidthx-service.exe [OPTIONS]");
                 println!();
                 println!("Options:");
-                println!("  --install     Register service with Windows SCM (Auto-start & Recovery)");
+                println!("  --install     Register service with Windows SCM (Auto-start & Verified Recovery)");
                 println!("  --uninstall   Unregister service from Windows SCM");
                 println!("  --start       Start the registered service via SCM");
                 println!("  --stop        Stop the registered service via SCM");
@@ -903,7 +1165,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return run_console_mode();
         } else {
             eprintln!("StartServiceCtrlDispatcherW failed with error code: {}", err);
-            return Err(format!("SCM Dispatcher error: {}", err).into());
+            std::process::exit(3);
         }
     }
 

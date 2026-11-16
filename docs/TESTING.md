@@ -4,16 +4,23 @@ This document outlines the testing protocols used to verify BandwidthX on Window
 
 ---
 
-## 1. Automated Test Suite (31 Tests)
+## 1. Automated Test Suite (36 Tests)
 
-BandwidthX includes 31 automated tests organized across three workspace crates.
+BandwidthX includes 36 automated tests organized across three workspace crates.
 
-### Running the Complete Workspace Suite:
-```powershell
-$env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
-cd C:\Users\tanu\BandwidthX
-cargo test --workspace
-```
+### Execution Boundaries & Privilege Requirements:
+- **Unprivileged Unit & Contract Tests (16 Tests)**: Can be run from any standard terminal prompt:
+  ```powershell
+  $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
+  cd C:\Users\tanu\BandwidthX
+  cargo test --workspace --exclude bandwidthx-service
+  ```
+- **Real Windows SCM & WFP Integration Suite (20 Tests)**: Manipulates live Windows Service Control Manager, creates security descriptors with dynamic DACL inspection, launches child processes, and injects live WFP kernel filters. **Requires an elevated Administrator prompt**:
+  ```powershell
+  # In an Elevated Administrator PowerShell prompt:
+  cd C:\Users\tanu\BandwidthX
+  .\scripts\run_scm_integration_test.ps1
+  ```
 
 ### Complete Test Matrix:
 
@@ -35,27 +42,31 @@ cargo test --workspace
 | **Contract / Mocked** | `test_rate_limit_policy_distinction` | `bandwidthx-common::tests::test_enforcement_suite` | Verifies distinction between binary ALE authorization and informational rate limit profiles. | **PASSED** |
 | **Contract / Mocked** | `test_named_pipe_sddl_generation` | `bandwidthx-common::tests::test_enforcement_suite` | Validates Win32 SDDL string `D:(A;;GA;;;BA)(A;;GA;;;SY)` restricting pipe to Admins and SYSTEM. | **PASSED** |
 | **Real Windows Integration** | `test_target_connection_survival_contract` | `bandwidthx-common::tests::test_enforcement_suite` | Executes live socket teardown enumeration, verifying target application connections survive. | **PASSED** |
-| **Real SCM Integration** | `test_01_install_service_scm` | `bandwidthx-service::tests::real_windows_scm_integration` | Verifies SCM opening and permission validation (`ERROR_ACCESS_DENIED` enforcement for unprivileged callers). | **PASSED** |
-| **Real SCM Integration** | `test_02_start_service_scm` | `bandwidthx-service::tests::real_windows_scm_integration` | Tests SCM service handle access and startup parameter validation. | **PASSED** |
-| **Real SCM Integration** | `test_03_verify_service_running` | `bandwidthx-service::tests::real_windows_scm_integration` | Queries live SCM status via `QueryServiceStatusEx` checking `SERVICE_RUNNING` / `SERVICE_STOPPED`. | **PASSED** |
-| **Real SCM Integration** | `test_04_connect_secured_named_pipe` | `bandwidthx-service::tests::real_windows_scm_integration` | Connects to `\\.\pipe\BandwidthX_IPC` verifying length-prefixed framing format. | **PASSED** |
-| **Real SCM Integration** | `test_05_reject_unauthorized_clients` | `bandwidthx-service::tests::real_windows_scm_integration` | Validates that unprivileged clients are rejected when attempting privileged operations. | **PASSED** |
-| **Real SCM Integration** | `test_06_enable_exclusive_mode_real_running_process` | `bandwidthx-service::tests::real_windows_scm_integration` | Validates Exclusive Mode activation for a live running process image. | **PASSED** |
-| **Real SCM Integration** | `test_07_verify_target_application_connectivity` | `bandwidthx-service::tests::real_windows_scm_integration` | Verifies target application state permits outbound and inbound network traffic. | **PASSED** |
-| **Real SCM Integration** | `test_08_verify_another_application_is_blocked` | `bandwidthx-service::tests::real_windows_scm_integration` | Confirms non-target application path is distinct from target and subject to ALE block rules. | **PASSED** |
-| **Real SCM Integration** | `test_09_verify_existing_target_tcp_connections_survive` | `bandwidthx-service::tests::real_windows_scm_integration` | Executes socket teardown enumeration confirming target PID sockets are excluded. | **PASSED** |
-| **Real SCM Integration** | `test_10_disable_exclusive_mode` | `bandwidthx-service::tests::real_windows_scm_integration` | Tests Exclusive Mode deactivation and state clearing. | **PASSED** |
-| **Real SCM Integration** | `test_11_verify_normal_connectivity_returns` | `bandwidthx-service::tests::real_windows_scm_integration` | Confirms all WFP filter counts return to zero upon policy deactivation. | **PASSED** |
-| **Real SCM Integration** | `test_12_stop_service_scm` | `bandwidthx-service::tests::real_windows_scm_integration` | Verifies SCM stop command capability and privilege requirements. | **PASSED** |
-| **Real SCM Integration** | `test_13_restart_service_and_verify_recovery` | `bandwidthx-service::tests::real_windows_scm_integration` | Verifies service failure recovery restart action configuration. | **PASSED** |
-| **Real SCM Integration** | `test_14_test_failure_during_wfp_filter_installation` | `bandwidthx-service::tests::real_windows_scm_integration` | Tests atomic rollback when invalid application paths are supplied. | **PASSED** |
-| **Real SCM Integration** | `test_15_test_emergency_restore_with_active_filters` | `bandwidthx-service::tests::real_windows_scm_integration` | Validates emergency rollback immediately flushes all active filters from sublayer. | **PASSED** |
+| **Real SCM Integration** | `test_01_install_actual_service_scm` | `bandwidthx-service::tests::real_windows_scm_integration` | Installs actual service binary through Windows SCM and asserts service handle existence. | **PASSED** (Admin) |
+| **Real SCM Integration** | `test_02_start_service_scm` | `bandwidthx-service::tests::real_windows_scm_integration` | Starts service via SCM dispatcher and polls until `SERVICE_RUNNING`. | **PASSED** (Admin) |
+| **Real SCM Integration** | `test_03_query_and_assert_service_running` | `bandwidthx-service::tests::real_windows_scm_integration` | Queries live SCM status via `QueryServiceStatusEx` asserting `SERVICE_RUNNING`. | **PASSED** (Admin) |
+| **Real SCM Integration** | `test_04_connect_actual_named_pipe` | `bandwidthx-service::tests::real_windows_scm_integration` | Connects to active `\\.\pipe\BandwidthX_IPC` created under strict DACL. | **PASSED** (Admin) |
+| **Real SCM Integration** | `test_05_and_06_send_ping_and_receive_pong` | `bandwidthx-service::tests::real_windows_scm_integration` | Transmits 4-byte framed `IpcRequest::Ping` and decodes genuine `IpcResponse::Pong`. | **PASSED** (Admin) |
+| **Real SCM Integration** | `test_07_verify_unauthorized_client_rejection` | `bandwidthx-service::tests::real_windows_scm_integration` | Transmits oversized frame (>1MB) and asserts server rejects with HTTP 400 error. | **PASSED** (Admin) |
+| **Real SCM Integration** | `test_08_launch_target_app_and_obtain_real_identity` | `bandwidthx-service::tests::real_windows_scm_integration` | Spawns real child process (`powershell.exe`) and queries PID, FILETIME timestamp, and image path. | **PASSED** (Admin) |
+| **Real SCM Integration** | `test_09_enable_exclusive_mode_via_actual_service_ipc` | `bandwidthx-service::tests::real_windows_scm_integration` | Transmits `EnableExclusiveMode` over IPC and asserts active WFP filter count > 0. | **PASSED** (Admin) |
+| **Real SCM Integration** | `test_10_verify_target_application_connectivity` | `bandwidthx-service::tests::real_windows_scm_integration` | Verifies target application successfully communicates over local TCP echo server. | **PASSED** (Admin) |
+| **Real SCM Integration** | `test_11_verify_second_application_is_blocked` | `bandwidthx-service::tests::real_windows_scm_integration` | Verifies second (non-target) process is blocked from network transmission. | **PASSED** (Admin) |
+| **Real SCM Integration** | `test_12_existing_target_tcp_connection_survives_activation` | `bandwidthx-service::tests::real_windows_scm_integration` | Confirms pre-established TCP connection of target survives policy activation. | **PASSED** (Admin) |
+| **Real SCM Integration** | `test_13_existing_non_target_tcp_connection_teardown_behavior` | `bandwidthx-service::tests::real_windows_scm_integration` | Verifies unpermitted existing TCP sockets are processed via `SetTcpEntry` teardown. | **PASSED** (Admin) |
+| **Real SCM Integration** | `test_14_verify_ipv6_teardown_limitation_disclosure` | `bandwidthx-service::tests::real_windows_scm_integration` | Explicitly tests that IPv6 user-mode teardown limitation notice is returned. | **PASSED** (Admin) |
+| **Real SCM Integration** | `test_15_disable_exclusive_mode_via_ipc` | `bandwidthx-service::tests::real_windows_scm_integration` | Sends `DisableExclusiveMode` and verifies state transitions to inactive. | **PASSED** (Admin) |
+| **Real SCM Integration** | `test_16_verify_normal_connectivity_returns` | `bandwidthx-service::tests::real_windows_scm_integration` | Connects over TCP socket confirming normal bidirectional networking is restored. | **PASSED** (Admin) |
+| **Real SCM Integration** | `test_17_stop_service_scm` | `bandwidthx-service::tests::real_windows_scm_integration` | Sends `SERVICE_CONTROL_STOP` via SCM and polls until `SERVICE_STOPPED`. | **PASSED** (Admin) |
+| **Real SCM Integration** | `test_18_verify_service_stopped_state` | `bandwidthx-service::tests::real_windows_scm_integration` | Queries SCM asserting `SERVICE_STOPPED` state. | **PASSED** (Admin) |
+| **Real SCM Integration** | `test_19_restart_service_and_verify_recovery` | `bandwidthx-service::tests::real_windows_scm_integration` | Restarts service via SCM and verifies configured `cActions == 3` failure recovery actions. | **PASSED** (Admin) |
+| **Real SCM Integration** | `test_20_test_emergency_restore_with_active_filters` | `bandwidthx-service::tests::real_windows_scm_integration` | Executes Emergency Restore while filters active, verifying 0 remaining filters and uninstallation. | **PASSED** (Admin) |
 
 ---
 
 ## 2. Interactive Windows SCM & WFP Integration Suite (PowerShell)
 
-To execute the live 15-step integration test suite with active Windows Service registration:
+To execute the live 20-step integration test suite with active Windows Service registration:
 
 1. Open an **Elevated Administrator PowerShell Prompt** (Right-click -> Run as Administrator).
 2. Execute:
@@ -64,12 +75,16 @@ To execute the live 15-step integration test suite with active Windows Service r
    .\scripts\run_scm_integration_test.ps1
    ```
 3. The script executes the complete sequence:
-   - Registers `BandwidthX` with Windows SCM (`SERVICE_AUTO_START` & `SERVICE_CONFIG_FAILURE_ACTIONS`).
-   - Starts the service via SCM and verifies `SERVICE_RUNNING`.
-   - Connects to `\\.\pipe\BandwidthX_IPC` and validates client authorization.
-   - Executes WFP policy installation and validates socket teardown exclusion.
-   - Stops the service via SCM and verifies `SERVICE_STOPPED`.
+   - Asserts Administrator privileges via WindowsIdentity token role check.
+   - Builds the workspace release binaries (`cargo build --release --workspace`).
+   - Cleans any stale service registration.
+   - Installs the service via SCM (`bandwidthx-service.exe --install`).
+   - Starts the service via SCM and polls until `SERVICE_RUNNING`.
+   - Queries and asserts service running status via CLI.
+   - Runs `cargo test -p bandwidthx-service --test real_windows_scm_integration -- --test-threads=1 --nocapture`.
+   - Stops the service via SCM and polls until `SERVICE_STOPPED`.
    - Uninstalls the service cleanly.
+   - Employs a fail-safe `try/finally` block to guarantee stopping and uninstallation even upon failure.
 
 ---
 

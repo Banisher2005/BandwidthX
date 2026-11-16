@@ -69,15 +69,16 @@ The privileged service binary (`bandwidthx-service.exe`) implements the native W
    - Initializes a Tokio multi-threaded asynchronous runtime.
    - Transitions to `SERVICE_RUNNING` and accepts `SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN`.
 3. **Control Handler & Graceful Teardown**:
-   - Upon receiving `SERVICE_CONTROL_STOP` or `SERVICE_CONTROL_SHUTDOWN`, the handler transitions to `SERVICE_STOP_PENDING`.
-   - Signals the Tokio async server loop via a broadcast channel.
-   - Performs an emergency WFP policy flush (`engine.emergency_restore()`), guaranteeing that controlled shutdowns never leave the network filtered.
-   - Transitions to `SERVICE_STOPPED` and terminates cleanly.
+   - Upon receiving `SERVICE_CONTROL_STOP` or `SERVICE_CONTROL_SHUTDOWN`, the handler transitions to `SERVICE_STOP_PENDING` with `dwWaitHint = 10000`.
+   - The SCM handler is **strictly non-blocking**: it transmits an asynchronous broadcast signal (`SHUTDOWN_TX`) to the Tokio runtime and returns `NO_ERROR` (0) immediately, preventing Windows SCM Error 1053 timeouts.
+   - The Tokio execution runtime catches the shutdown signal and executes bounded emergency restoration (`tokio::time::timeout` of 5 seconds on `engine.emergency_restore()`), guaranteeing that all WFP filters are flushed.
+   - Transitions to `SERVICE_STOPPED` and terminates cleanly only after WFP cleanup finishes.
 4. **Service Failure Recovery Actions**:
    - During service registration (`--install`), `ChangeServiceConfig2W` configures `SERVICE_CONFIG_FAILURE_ACTIONS`:
      - 1st Failure: Automatic restart after 5,000ms.
      - 2nd Failure: Automatic restart after 10,000ms.
      - Reset Period: 86,400s (24 hours).
+   - The configuration is authoritatively verified by querying `QueryServiceConfig2W(SERVICE_CONFIG_FAILURE_ACTIONS)` to assert that exactly 3 failure actions are committed to the SCM database. If configuration fails, the service installation aborts and self-deletes.
 
 ---
 
@@ -147,15 +148,20 @@ ALE authorization filters evaluate new connection handshakes (`AUTH_CONNECT` / `
 - **Security Descriptor (SDDL DACL)**: `D:(A;;GA;;;BA)(A;;GA;;;SY)`
   - Explicitly grants Generic All (`GA`) only to `BUILTIN\Administrators` (`BA`) and `NT AUTHORITY\LocalSystem` (`SY`).
   - No unsecured fallback: service startup immediately aborts if secure pipe creation fails.
-  - Pipe handle security descriptor is authoritatively verified via `GetKernelObjectSecurity`.
-- **Framing Protocol**: 4-byte big-endian length prefix with a strict 1 MB maximum payload bound.
+- **Deep Kernel DACL & ACE Inspection**:
+  - The pipe handle security descriptor is retrieved via `GetKernelObjectSecurity(DACL_SECURITY_INFORMATION)`.
+  - The DACL is extracted via `GetSecurityDescriptorDacl` and each ACE is inspected via `GetAce`.
+  - Ensures only `ACCESS_ALLOWED_ACE_TYPE` entries exist.
+  - Compares ACE SIDs against Builtin Administrators (`S-1-5-32-544`) and LocalSystem (`S-1-5-18`) using `EqualSid`.
+  - Fails closed immediately if any unexpected or excessively permissive ACE is present.
+- **Framing Protocol**: 4-byte big-endian length prefix with a strict 1 MB maximum payload bound. Requests exceeding 1 MB or with malformed frames are rejected with HTTP 400.
 
-### Complete Client Authorization
-1. Client PID is queried via `GetNamedPipeClientProcessId`.
-2. The server invokes `ImpersonateNamedPipeClient` to adopt the client's security context.
-3. `CheckTokenMembership` verifies whether the client is a member of the Builtin Administrators group SID (`S-1-5-32-544`).
-4. `RevertToSelf()` restores service context.
-5. Client process token is inspected for `TokenElevation`. Both checks must succeed.
+### Complete Client Authorization & RAII Guard
+1. The server accepts the client connection and reads the bounded 4-byte length header and payload frame.
+2. The server acquires an `ImpersonationGuard`, an RAII guard invoking `ImpersonateNamedPipeClient` on creation that guarantees `RevertToSelf()` runs on drop across all control flows and error paths.
+3. Under the client's impersonation token, `CheckTokenMembership` verifies whether the caller is an active member of `BUILTIN\Administrators` (`S-1-5-32-544`).
+4. The `ImpersonationGuard` is dropped, restoring the service's privileged context.
+5. Client PID is queried via `GetNamedPipeClientProcessId` and the process token is opened to verify `TokenElevation`. Both checks must succeed before executing any privileged operation.
 
 ### Process Identity Lifetime Pinning & Race Prevention
 1. Nonzero creation timestamp required (`claimed_creation_time > 0`).

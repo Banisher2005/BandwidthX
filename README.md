@@ -17,8 +17,8 @@ Its defining feature is **EXCLUSIVE MODE**: Select one running application to gr
 - **Active Established Connection Teardown**: Upon Exclusive Mode activation, unpermitted established TCP connections are reset using `SetTcpEntry` with `MIB_TCP_STATE_DELETE_TCB`. Sockets belonging to the chosen target application are strictly preserved. Teardown results and IPv6 boundaries are logged and surfaced via `TeardownReport`.
 - **Dynamic Fail-Safe Guarantee**: Built on `FWPM_SESSION_FLAG_DYNAMIC`. If the application or service ever terminates, crashes, or reboots, the Windows kernel automatically purges all BandwidthX filters immediately.
 - **Emergency One-Click Rollback**: Instantly restores default unrestricted networking with a single click from any screen.
-- **Authoritative Privileged Service**: Dedicated standalone Windows service communicating via a fail-closed Named Pipe (`\\.\pipe\BandwidthX_IPC`) protected by an explicit SDDL DACL (`D:(A;;GA;;;BA)(A;;GA;;;SY)`), client impersonation with Builtin Administrators SID validation (`CheckTokenMembership`), and token elevation verification (`TokenElevation`).
-- **Native Windows SCM Dispatcher Lifecycle**: Implements `StartServiceCtrlDispatcherW`, `ServiceMain`, and `RegisterServiceCtrlHandlerExW` with accurate state transitions (`START_PENDING` -> `RUNNING` -> `STOP_PENDING` -> `STOPPED`) and automatic failure recovery actions (`SERVICE_CONFIG_FAILURE_ACTIONS`).
+- **Authoritative Privileged Service**: Dedicated standalone Windows service communicating via a fail-closed Named Pipe (`\\.\pipe\BandwidthX_IPC`) protected by an explicit SDDL DACL (`D:(A;;GA;;;BA)(A;;GA;;;SY)`), deep kernel object DACL/ACE inspection (`GetKernelObjectSecurity`), RAII-guarded client impersonation with Builtin Administrators SID validation (`CheckTokenMembership`), and token elevation verification (`TokenElevation`).
+- **Native Windows SCM Dispatcher Lifecycle**: Implements `StartServiceCtrlDispatcherW`, `ServiceMain`, non-blocking `RegisterServiceCtrlHandlerExW` control dispatching, bounded Tokio emergency restoration, accurate state transitions (`START_PENDING` -> `RUNNING` -> `STOP_PENDING` -> `STOPPED`), and authoritatively verified failure recovery actions (`SERVICE_CONFIG_FAILURE_ACTIONS`).
 - **Network Rule Engine**: Configure Allow, Block, Limits, and Priority rules anchored to persistent executable identities and backed by SQLite.
 - **Network Usage Analytics**: Historical metrics (hourly, daily, weekly, monthly) stored locally in SQLite with interactive charts and CSV data export.
 - **Windows 11 Dark Aesthetic**: Designed with deep charcoal surfaces (`#0B0F10`, `#12191A`), subtle green/teal accents (`#91DB79`, `#57C7B5`), and responsive Recharts visualizations.
@@ -52,8 +52,8 @@ BandwidthX/
 │   └── Cargo.toml
 │
 ├── windows-service/              # Standalone Privileged Windows Service
-│   ├── src/main.rs               # SCM Dispatcher, ServiceMain, SDDL pipe, & process handle pinning
-│   ├── tests/                    # 15 Real Windows SCM and WFP integration tests
+│   ├── src/main.rs               # SCM Dispatcher, ServiceMain, dynamic DACL inspection, & RAII impersonation
+│   ├── tests/                    # 20 Real Windows SCM, Security and WFP integration tests
 │   └── Cargo.toml
 │
 ├── crates/common/                # Shared Core Engine, IPC Framing & WFP Driver Logic
