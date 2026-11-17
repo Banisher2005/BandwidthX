@@ -73,7 +73,7 @@ impl ServiceClient {
             is_service_connected: false,
             exclusive_mode_active: false,
             active_filter_count: 0,
-            version: "2.3.0".to_string(),
+            version: "3.0.0".to_string(),
         }
     }
 

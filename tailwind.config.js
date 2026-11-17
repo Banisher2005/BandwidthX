@@ -7,23 +7,32 @@ export default {
   theme: {
     extend: {
       colors: {
-        background: '#0B0F10',
+        background: {
+          DEFAULT: '#090D12',
+          secondary: '#101820',
+        },
         surface: {
-          DEFAULT: '#12191A',
-          secondary: '#192223',
-          tertiary: '#212D2E',
+          DEFAULT: '#101820',
+          secondary: '#16222E',
+          tertiary: '#1D2D3D',
+        },
+        glass: {
+          panel: 'rgba(255, 255, 255, 0.045)',
+          panelHover: 'rgba(255, 255, 255, 0.075)',
+          border: 'rgba(255, 255, 255, 0.09)',
+          borderHover: 'rgba(255, 255, 255, 0.16)',
         },
         accent: {
           primary: '#91DB79',
           secondary: '#57C7B5',
         },
         content: {
-          primary: '#EDF5F0',
-          secondary: '#91A39A',
-          muted: '#62736A',
+          primary: '#EAF0F4',
+          secondary: '#8997A4',
+          muted: '#5F6F7E',
         },
         status: {
-          warning: '#E9B65C',
+          warning: '#F3BB66',
           danger: '#EF6B70',
           success: '#91DB79',
           info: '#57C7B5',

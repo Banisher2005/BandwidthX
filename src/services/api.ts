@@ -5,7 +5,9 @@ import {
   ServiceStatus, 
   NetworkRule, 
   AppSettings, 
-  AnalyticsRecord 
+  AnalyticsRecord,
+  SpeedTestProgress,
+  WindowsServiceInfo
 } from '../types';
 
 let isTauri = false;
@@ -36,6 +38,16 @@ async function invokeBackend<T>(cmd: string, args?: Record<string, unknown>): Pr
 export const api = {
   getGlobalNetworkStats: () => invokeBackend<GlobalNetworkStats>('get_global_network_stats'),
   getProcessNetworkList: () => invokeBackend<ProcessNetworkInfo[]>('get_process_network_list'),
+  terminateProcess: (pid: number, claimed_creation_time?: number) =>
+    invokeBackend<boolean>('terminate_process', { pid, claimed_creation_time: claimed_creation_time || 0 }),
+  startSpeedTest: (custom_endpoint?: string) =>
+    invokeBackend<SpeedTestProgress>('start_speed_test', { custom_endpoint }),
+  getSpeedTestProgress: () => invokeBackend<SpeedTestProgress>('get_speed_test_progress'),
+  cancelSpeedTest: () => invokeBackend<boolean>('cancel_speed_test'),
+  getWindowsServicesList: () => invokeBackend<WindowsServiceInfo[]>('get_windows_services_list'),
+  startWindowsService: (service_name: string) => invokeBackend<boolean>('start_windows_service', { service_name }),
+  stopWindowsService: (service_name: string) => invokeBackend<boolean>('stop_windows_service', { service_name }),
+  restartWindowsService: (service_name: string) => invokeBackend<boolean>('restart_windows_service', { service_name }),
   getExclusiveModeState: () => invokeBackend<ExclusiveModeState>('get_exclusive_mode_state'),
   enableExclusiveMode: (target_pid: number, exe_path: string, app_name: string, target_creation_time?: number) => 
     invokeBackend<ExclusiveModeState>('enable_exclusive_mode', { target_pid, exe_path, app_name, target_creation_time: target_creation_time || 0 }),
@@ -156,15 +168,91 @@ function getFallbackData<T>(cmd: string, _args?: Record<string, unknown>): T {
   if (cmd === 'get_rules') {
     return [] as unknown as T;
   }
+  if (cmd === 'get_windows_services_list') {
+    return [
+      {
+        service_name: 'Dnscache',
+        display_name: 'DNS Client',
+        pid: 1420,
+        exe_path: 'C:\\Windows\\System32\\svchost.exe -k NetworkService',
+        status: 'Running',
+        startup_type: 'Automatic',
+        description: 'Resolves and caches Domain Name System (DNS) names for this computer.',
+        classification: 'Protected',
+        can_stop: false,
+        can_start: false,
+        can_restart: false,
+      },
+      {
+        service_name: 'Dhcp',
+        display_name: 'DHCP Client',
+        pid: 1680,
+        exe_path: 'C:\\Windows\\System32\\svchost.exe -k LocalServiceNetworkRestricted',
+        status: 'Running',
+        startup_type: 'Automatic',
+        description: 'Registers and updates IP addresses and DNS records for this computer.',
+        classification: 'Protected',
+        can_stop: false,
+        can_start: false,
+        can_restart: false,
+      },
+      {
+        service_name: 'wuauserv',
+        display_name: 'Windows Update',
+        pid: 3120,
+        exe_path: 'C:\\Windows\\System32\\svchost.exe -k netsvcs',
+        status: 'Running',
+        startup_type: 'Manual',
+        description: 'Enables the detection, download, and installation of updates for Windows and other programs.',
+        classification: 'System',
+        can_stop: true,
+        can_start: false,
+        can_restart: true,
+      },
+      {
+        service_name: 'Steam Client Service',
+        display_name: 'Steam Client Service',
+        pid: null,
+        exe_path: 'C:\\Program Files (x86)\\Common Files\\Steam\\SteamService.exe',
+        status: 'Stopped',
+        startup_type: 'Manual',
+        description: 'Steam Client Service monitors and updates Steam content.',
+        classification: 'User',
+        can_stop: false,
+        can_start: true,
+        can_restart: false,
+      }
+    ] as unknown as T;
+  }
+  if (cmd === 'get_speed_test_progress' || cmd === 'start_speed_test') {
+    return {
+      is_running: false,
+      phase: 'completed',
+      progress_percent: 100,
+      ping_ms: 18.4,
+      jitter_ms: 2.8,
+      download_speed_bps: 142800000,
+      upload_speed_bps: 38400000,
+      current_throughput_bps: 0,
+      bytes_transferred: 20000000,
+      server_name: 'Cloudflare Edge CDN (Default)',
+      error_message: null,
+      timestamp: new Date().toISOString(),
+    } as unknown as T;
+  }
+  if (cmd === 'terminate_process' || cmd === 'stop_windows_service' || cmd === 'start_windows_service' || cmd === 'restart_windows_service') {
+    return true as unknown as T;
+  }
   if (cmd === 'get_settings') {
     return {
       start_with_windows: false,
       start_minimized: false,
       monitoring_interval_ms: 1000,
+      speed_test_endpoint: 'https://speed.cloudflare.com',
       data_retention_days: 30,
       selected_adapter: 'Auto-detect active',
       notifications_enabled: true,
-      theme: 'charcoal-dark',
+      theme: 'glassmorphic-charcoal',
       fail_safe_timeout_seconds: 30,
     } as unknown as T;
   }

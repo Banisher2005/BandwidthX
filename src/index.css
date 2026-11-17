@@ -4,8 +4,32 @@
 
 @layer base {
   body {
-    @apply bg-[#0B0F10] text-[#EDF5F0] antialiased selection:bg-[#91DB79] selection:text-[#0B0F10];
+    @apply bg-background text-content-primary antialiased selection:bg-accent-primary selection:text-background;
     font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+    background: radial-gradient(circle at 50% 0%, #16222E 0%, #090D12 70%);
+    min-height: 100vh;
+  }
+}
+
+@layer utilities {
+  .glass-card {
+    background: rgba(255, 255, 255, 0.04);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+  }
+  .glass-card-hover {
+    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .glass-card-hover:hover {
+    background: rgba(255, 255, 255, 0.065);
+    border-color: rgba(255, 255, 255, 0.15);
+  }
+  .glass-panel-elevated {
+    background: rgba(16, 24, 32, 0.7);
+    backdrop-filter: blur(24px);
+    -webkit-backdrop-filter: blur(24px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
   }
 }
 
@@ -16,14 +40,14 @@
 }
 
 ::-webkit-scrollbar-track {
-  background: #0B0F10;
+  background: transparent;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #192223;
-  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 9999px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #212D2E;
+  background: rgba(255, 255, 255, 0.22);
 }

@@ -293,7 +293,7 @@ impl NetworkTelemetryEngine {
                             ) == 0 {
                                 if let Some((prev_in, prev_out, prev_time)) = cache.get(&key) {
                                     let dt = now.duration_since(*prev_time).as_secs_f64();
-                                    if dt > 0.05 {
+                                    if dt > 0.1 {
                                         let delta_in = if rod.data_bytes_in >= *prev_in {
                                             ((rod.data_bytes_in - *prev_in) as f64 / dt) as u64
                                         } else { 0 };
@@ -305,9 +305,13 @@ impl NetworkTelemetryEngine {
                                         let entry = pid_traffic.entry(row.owning_pid).or_insert((0, 0));
                                         entry.0 += delta_in;
                                         entry.1 += delta_out;
+
+                                        cache.insert(key, (rod.data_bytes_in, rod.data_bytes_out, now));
                                     }
+                                } else {
+                                    // Initial baseline recording for newly detected socket
+                                    cache.insert(key, (rod.data_bytes_in, rod.data_bytes_out, now));
                                 }
-                                cache.insert(key, (rod.data_bytes_in, rod.data_bytes_out, now));
                             }
                         }
                     }
@@ -384,7 +388,7 @@ impl NetworkTelemetryEngine {
                             ) == 0 {
                                 if let Some((prev_in, prev_out, prev_time)) = cache.get(&key) {
                                     let dt = now.duration_since(*prev_time).as_secs_f64();
-                                    if dt > 0.05 {
+                                    if dt > 0.1 {
                                         let delta_in = if rod.data_bytes_in >= *prev_in {
                                             ((rod.data_bytes_in - *prev_in) as f64 / dt) as u64
                                         } else { 0 };
@@ -396,9 +400,13 @@ impl NetworkTelemetryEngine {
                                         let entry = pid_traffic.entry(row.owning_pid).or_insert((0, 0));
                                         entry.0 += delta_in;
                                         entry.1 += delta_out;
+
+                                        cache.insert(key, (rod.data_bytes_in, rod.data_bytes_out, now));
                                     }
+                                } else {
+                                    // Initial baseline recording for newly detected socket
+                                    cache.insert(key, (rod.data_bytes_in, rod.data_bytes_out, now));
                                 }
-                                cache.insert(key, (rod.data_bytes_in, rod.data_bytes_out, now));
                             }
                         }
                     }

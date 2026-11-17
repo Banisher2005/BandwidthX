@@ -4,11 +4,12 @@ pub mod storage;
 pub mod service;
 pub mod commands;
 
+use std::sync::Arc;
 use tauri::Manager;
 use commands::AppState;
-use network::NetworkTelemetryEngine;
+use network::{NetworkTelemetryEngine, CentralizedTelemetryManager, SpeedTestEngine};
 use process::ProcessManager;
-use service::ServiceClient;
+use service::{ServiceClient, WindowsServiceManager};
 use storage::Database;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -18,9 +19,20 @@ pub fn run() {
         .join("bandwidthx.db");
 
     let db = Database::new(db_path).expect("Failed to initialize SQLite database");
+    let telemetry_engine = Arc::new(NetworkTelemetryEngine::new());
+    let process_mgr = Arc::new(ProcessManager::new());
+    let centralized_telemetry = Arc::new(CentralizedTelemetryManager::new(
+        Arc::clone(&telemetry_engine),
+        Arc::clone(&process_mgr),
+    ));
+    let speedtest = Arc::new(SpeedTestEngine::new());
+    let windows_services = Arc::new(WindowsServiceManager::new());
+
     let state = AppState {
-        telemetry: NetworkTelemetryEngine::new(),
-        process_mgr: ProcessManager::new(),
+        centralized_telemetry,
+        process_mgr,
+        speedtest,
+        windows_services,
         service: ServiceClient::new(),
         db,
     };
@@ -30,6 +42,14 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_global_network_stats,
             commands::get_process_network_list,
+            commands::terminate_process,
+            commands::start_speed_test,
+            commands::get_speed_test_progress,
+            commands::cancel_speed_test,
+            commands::get_windows_services_list,
+            commands::start_windows_service,
+            commands::stop_windows_service,
+            commands::restart_windows_service,
             commands::get_exclusive_mode_state,
             commands::enable_exclusive_mode,
             commands::disable_exclusive_mode,

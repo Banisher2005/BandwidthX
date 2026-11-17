@@ -203,4 +203,63 @@ impl ProcessManager {
     pub fn get_process_path(&self, pid: u32) -> String {
         self.get_process_identity(pid).1
     }
+
+    /// Safely terminates an exact running process instance after verifying PID and creation time.
+    /// Never terminates other processes sharing the executable name.
+    pub fn terminate_process(&self, pid: u32, claimed_creation_time: u64) -> Result<bool, String> {
+        if pid == 0 || pid == 4 {
+            return Err("Cannot terminate core Windows kernel or idle process".to_string());
+        }
+
+        unsafe {
+            use windows_sys::Win32::System::Threading::{
+                PROCESS_TERMINATE, TerminateProcess, WaitForSingleObject,
+            };
+
+            // Open with minimum required rights: PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE
+            let handle: HANDLE = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | 0x00100000, 0, pid);
+            if handle.is_null() {
+                return Err(format!("Failed to open process PID {} for termination: {}", pid, std::io::Error::last_os_error()));
+            }
+
+            // Verify process creation time if specified to prevent PID recycling race
+            if claimed_creation_time > 0 {
+                let mut creation_time: FILETIME = std::mem::zeroed();
+                let mut exit_time: FILETIME = std::mem::zeroed();
+                let mut kernel_time: FILETIME = std::mem::zeroed();
+                let mut user_time: FILETIME = std::mem::zeroed();
+
+                if GetProcessTimes(handle, &mut creation_time, &mut exit_time, &mut kernel_time, &mut user_time) != 0 {
+                    let actual_ts = ((creation_time.dwHighDateTime as u64) << 32) | (creation_time.dwLowDateTime as u64);
+                    if actual_ts != claimed_creation_time {
+                        CloseHandle(handle);
+                        return Err(format!(
+                            "PID recycling detected: PID {} was replaced (expected timestamp {}, actual is {})",
+                            pid, claimed_creation_time, actual_ts
+                        ));
+                    }
+                }
+            }
+
+            let term_res = TerminateProcess(handle, 1);
+            if term_res == 0 {
+                let err = std::io::Error::last_os_error();
+                CloseHandle(handle);
+                return Err(format!("TerminateProcess failed for PID {}: {}", pid, err));
+            }
+
+            // Verify whether process actually exited (wait up to 1500ms)
+            let wait_res = WaitForSingleObject(handle, 1500);
+            CloseHandle(handle);
+
+            // Clean up from local tracker
+            self.process_tracker.lock().remove(&pid);
+
+            if wait_res == 0 {
+                Ok(true)
+            } else {
+                Err(format!("Process PID {} signaled termination, but did not exit cleanly within timeout", pid))
+            }
+        }
+    }
 }

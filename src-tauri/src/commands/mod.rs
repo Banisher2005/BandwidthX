@@ -1,32 +1,39 @@
+use std::sync::Arc;
 use tauri::State;
 use bandwidthx_common::{
     GlobalNetworkStats, ProcessNetworkInfo, ExclusiveModeState, ServiceStatus, NetworkRule
 };
-use crate::network::NetworkTelemetryEngine;
+use crate::network::{CentralizedTelemetryManager, SpeedTestEngine, SpeedTestProgress};
 use crate::process::ProcessManager;
-use crate::service::ServiceClient;
+use crate::service::{ServiceClient, WindowsServiceManager, WindowsServiceInfo};
 use crate::storage::Database;
 
 pub struct AppState {
-    pub telemetry: NetworkTelemetryEngine,
-    pub process_mgr: ProcessManager,
+    pub centralized_telemetry: Arc<CentralizedTelemetryManager>,
+    pub process_mgr: Arc<ProcessManager>,
+    pub speedtest: Arc<SpeedTestEngine>,
+    pub windows_services: Arc<WindowsServiceManager>,
     pub service: ServiceClient,
     pub db: Database,
 }
 
 #[tauri::command]
 pub fn get_global_network_stats(state: State<'_, AppState>) -> GlobalNetworkStats {
-    let mut stats = state.telemetry.poll_global_stats();
-    let sockets = state.telemetry.get_sockets_by_pid();
-    stats.detected_applications = sockets.len();
-    stats
+    let exclusive_state = state.service.get_exclusive_mode_state();
+    let rules = state.db.get_rules().unwrap_or_default();
+    let blocked_paths: Vec<String> = rules.iter()
+        .filter(|r| r.enabled && r.rule_type == bandwidthx_common::RuleType::Block)
+        .map(|r| r.executable_path.clone())
+        .collect();
+
+    state.centralized_telemetry.get_global_stats(
+        exclusive_state.target_exe_path.as_deref(),
+        &blocked_paths,
+    )
 }
 
 #[tauri::command]
 pub fn get_process_network_list(state: State<'_, AppState>) -> Vec<ProcessNetworkInfo> {
-    let _ = state.telemetry.poll_global_stats();
-    let sockets = state.telemetry.get_sockets_by_pid();
-    let measured_traffic = state.telemetry.get_measured_pid_traffic();
     let exclusive_state = state.service.get_exclusive_mode_state();
     
     // Get list of blocked paths from rules
@@ -36,9 +43,7 @@ pub fn get_process_network_list(state: State<'_, AppState>) -> Vec<ProcessNetwor
         .map(|r| r.executable_path.clone())
         .collect();
 
-    let procs = state.process_mgr.get_processes_with_network(
-        &sockets,
-        &measured_traffic,
+    let procs = state.centralized_telemetry.get_processes(
         exclusive_state.target_exe_path.as_deref(),
         &blocked_paths,
     );
@@ -51,6 +56,54 @@ pub fn get_process_network_list(state: State<'_, AppState>) -> Vec<ProcessNetwor
     }
 
     procs
+}
+
+#[tauri::command]
+pub fn terminate_process(
+    state: State<'_, AppState>,
+    pid: u32,
+    claimed_creation_time: Option<u64>,
+) -> Result<bool, String> {
+    state.process_mgr.terminate_process(pid, claimed_creation_time.unwrap_or(0))
+}
+
+#[tauri::command]
+pub async fn start_speed_test(
+    state: State<'_, AppState>,
+    custom_endpoint: Option<String>,
+) -> Result<SpeedTestProgress, String> {
+    let speedtest = Arc::clone(&state.speedtest);
+    speedtest.run_test(custom_endpoint).await
+}
+
+#[tauri::command]
+pub fn get_speed_test_progress(state: State<'_, AppState>) -> SpeedTestProgress {
+    state.speedtest.get_progress()
+}
+
+#[tauri::command]
+pub fn cancel_speed_test(state: State<'_, AppState>) -> bool {
+    state.speedtest.cancel()
+}
+
+#[tauri::command]
+pub fn get_windows_services_list(state: State<'_, AppState>) -> Result<Vec<WindowsServiceInfo>, String> {
+    state.windows_services.list_services()
+}
+
+#[tauri::command]
+pub fn start_windows_service(state: State<'_, AppState>, service_name: String) -> Result<bool, String> {
+    state.windows_services.start_service(&service_name)
+}
+
+#[tauri::command]
+pub fn stop_windows_service(state: State<'_, AppState>, service_name: String) -> Result<bool, String> {
+    state.windows_services.stop_service(&service_name)
+}
+
+#[tauri::command]
+pub fn restart_windows_service(state: State<'_, AppState>, service_name: String) -> Result<bool, String> {
+    state.windows_services.restart_service(&service_name)
 }
 
 #[tauri::command]
@@ -120,10 +173,11 @@ pub fn get_settings(_state: State<'_, AppState>) -> serde_json::Value {
         "start_with_windows": false,
         "start_minimized": false,
         "monitoring_interval_ms": 1000,
+        "speed_test_endpoint": "https://speed.cloudflare.com",
         "data_retention_days": 30,
         "selected_adapter": "Auto-detect active",
         "notifications_enabled": true,
-        "theme": "charcoal-dark",
+        "theme": "glassmorphic-charcoal",
         "fail_safe_timeout_seconds": 30,
     })
 }

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   PageType, 
   GlobalNetworkStats, 
@@ -6,7 +6,6 @@ import {
   ExclusiveModeState, 
   ServiceStatus, 
   NetworkRule, 
-  AnalyticsRecord, 
   AppSettings,
   TrafficHistoryPoint 
 } from './types';
@@ -14,20 +13,18 @@ import { api } from './services/api';
 import { Header } from './components/layout/Header';
 import { Sidebar } from './components/layout/Sidebar';
 import { StatusBar } from './components/layout/StatusBar';
-import { OverviewPage } from './components/dashboard/OverviewPage';
+import { NetworkPage } from './components/dashboard/NetworkPage';
 import { ApplicationsPage } from './components/applications/ApplicationsPage';
+import { WindowsServicesPage } from './components/services/WindowsServicesPage';
 import { ExclusiveModePage } from './components/exclusive/ExclusiveModePage';
-import { AnalyticsPage } from './components/analytics/AnalyticsPage';
-import { RulesPage } from './components/rules/RulesPage';
 import { SettingsPage } from './components/settings/SettingsPage';
 
 export function App() {
-  const [currentPage, setCurrentPage] = useState<PageType>('overview');
-  const [isMonitoring, setIsMonitoring] = useState(true);
-  const [isGraphPaused, setIsGraphPaused] = useState(false);
+  const [currentPage, setCurrentPage] = useState<PageType>('network');
+  const [isMonitoring] = useState(true);
   const [notification, setNotification] = useState<string | null>(null);
 
-  // Core State
+  // Core Global Telemetry State
   const [stats, setStats] = useState<GlobalNetworkStats>({
     download_speed_bps: 0,
     upload_speed_bps: 0,
@@ -35,7 +32,7 @@ export function App() {
     total_upload_bytes: 0,
     active_connections: 0,
     detected_applications: 0,
-    adapter_name: 'Detecting...',
+    adapter_name: 'Detecting network adapter...',
     adapter_type: 'Unknown',
     is_connected: false,
   });
@@ -59,15 +56,15 @@ export function App() {
     is_service_connected: false,
     exclusive_mode_active: false,
     active_filter_count: 0,
-    version: '2.3.0',
+    version: '3.0.0',
   });
 
   const [rules, setRules] = useState<NetworkRule[]>([]);
-  const [analytics, setAnalytics] = useState<AnalyticsRecord[]>([]);
   const [settings, setSettings] = useState<AppSettings>({
     start_with_windows: false,
     start_minimized: false,
     monitoring_interval_ms: 1000,
+    speed_test_endpoint: 'https://speed.cloudflare.com',
     data_retention_days: 30,
     selected_adapter: 'Auto-detect active',
     notifications_enabled: true,
@@ -75,7 +72,7 @@ export function App() {
     fail_safe_timeout_seconds: 30,
   });
 
-  // 60-second rolling history
+  // 60-second rolling history buffer
   const [history, setHistory] = useState<TrafficHistoryPoint[]>(() => {
     const initial: TrafficHistoryPoint[] = [];
     const now = new Date();
@@ -114,29 +111,27 @@ export function App() {
       setServiceStatus(newStatus);
       setRules(newRules);
 
-      // Append to graph history if not paused
-      if (!isGraphPaused) {
-        const timeStr = new Date().toTimeString().split(' ')[0];
-        setHistory((prev) => {
-          const next = [
-            ...prev.slice(1),
-            {
-              time: timeStr,
-              download: newStats.download_speed_bps,
-              upload: newStats.upload_speed_bps,
-              rawDownload: newStats.download_speed_bps,
-              rawUpload: newStats.upload_speed_bps,
-            },
-          ];
-          return next;
-        });
-      }
+      // Append to rolling history
+      const timeStr = new Date().toTimeString().split(' ')[0];
+      setHistory((prev) => {
+        const next = [
+          ...prev.slice(1),
+          {
+            time: timeStr,
+            download: newStats.download_speed_bps,
+            upload: newStats.upload_speed_bps,
+            rawDownload: newStats.download_speed_bps,
+            rawUpload: newStats.upload_speed_bps,
+          },
+        ];
+        return next;
+      });
     } catch (err) {
       console.error('Error fetching telemetry:', err);
     }
   };
 
-  // Polling loop
+  // Continuous polling loop
   useEffect(() => {
     refreshTelemetry();
     const interval = setInterval(() => {
@@ -146,11 +141,10 @@ export function App() {
     }, settings.monitoring_interval_ms || 1000);
 
     return () => clearInterval(interval);
-  }, [isMonitoring, isGraphPaused, settings.monitoring_interval_ms]);
+  }, [isMonitoring, settings.monitoring_interval_ms]);
 
-  // Load analytics and settings once
+  // Load settings on initial mount
   useEffect(() => {
-    api.getAnalytics('hourly').then(setAnalytics).catch(console.error);
     api.getSettings().then(setSettings).catch(console.error);
   }, []);
 
@@ -210,62 +204,27 @@ export function App() {
     }
   };
 
-  // Action: Save Rule
-  const handleSaveRule = async (rule: NetworkRule) => {
-    try {
-      await api.saveRule(rule);
-      showNotification(`Saved policy for ${rule.app_name}`);
-      refreshTelemetry();
-    } catch (err: any) {
-      showNotification(`Failed to save rule: ${err?.message}`);
-    }
-  };
-
-  // Action: Delete Rule
-  const handleDeleteRule = async (ruleId: string, exePath: string) => {
-    try {
-      await api.deleteRule(ruleId, exePath);
-      showNotification('Rule deleted successfully');
-      refreshTelemetry();
-    } catch (err: any) {
-      showNotification(`Failed to delete rule: ${err?.message}`);
-    }
-  };
-
-  // Action: Export CSV
-  const handleExportCsv = async (range: string) => {
-    try {
-      const csv = await api.exportAnalyticsCsv(range);
-      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.setAttribute('href', url);
-      link.setAttribute('download', `bandwidthx_telemetry_${range}_${Date.now()}.csv`);
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      showNotification('Telemetry report exported to CSV successfully.');
-    } catch (err: any) {
-      showNotification(`Export error: ${err?.message}`);
-    }
-  };
+  // Blocked applications count
+  const blockedCount = processes.filter((p) => p.is_blocked).length;
 
   return (
-    <div className="flex flex-col h-screen w-screen bg-[#0B0F10] text-[#EDF5F0] overflow-hidden font-sans">
+    <div className="flex flex-col h-screen w-screen bg-background text-content-primary overflow-hidden font-sans">
       {/* Toast Notification */}
       {notification && (
-        <div className="fixed top-4 right-4 z-50 bg-[#12191A] border border-[#91DB79]/50 text-[#EDF5F0] px-4 py-2.5 rounded-xl shadow-2xl text-xs font-medium flex items-center space-x-2 animate-bounce">
-          <span className="w-2 h-2 rounded-full bg-[#91DB79]"></span>
+        <div className="fixed top-4 right-4 z-50 glass-panel-elevated text-content-primary px-4 py-2.5 rounded-xl shadow-2xl text-xs font-medium flex items-center space-x-2 border border-accent-primary/50 animate-bounce">
+          <span className="w-2 h-2 rounded-full bg-accent-primary"></span>
           <span>{notification}</span>
         </div>
       )}
 
       {/* Top Header */}
       <Header
+        stats={stats}
         exclusiveState={exclusiveState}
         serviceStatus={serviceStatus}
         onEmergencyRestore={handleEmergencyRestore}
         onRefresh={refreshTelemetry}
+        onNavigate={setCurrentPage}
       />
 
       {/* Main Workspace Body */}
@@ -275,38 +234,35 @@ export function App() {
           currentPage={currentPage}
           onNavigate={setCurrentPage}
           exclusiveActive={exclusiveState.is_active}
-          activeRulesCount={rules.length}
+          blockedCount={blockedCount}
         />
 
         {/* Scrollable Page Viewport */}
-        <main className="flex-1 overflow-y-auto p-6 bg-[#0B0F10]">
-          {currentPage === 'overview' && (
-            <OverviewPage
+        <main className="flex-1 overflow-y-auto p-6 bg-background">
+          {(currentPage === 'network' || currentPage === 'overview' || currentPage === 'analytics') && (
+            <NetworkPage
               stats={stats}
-              processes={processes}
               history={history}
-              isGraphPaused={isGraphPaused}
-              onToggleGraphPause={() => setIsGraphPaused(!isGraphPaused)}
-              onSelectExclusive={(proc) => {
-                setCurrentPage('exclusive');
-                handleToggleExclusive(proc.pid, proc.exe_path, proc.name);
-              }}
-              onNavigateToApplications={() => setCurrentPage('applications')}
+              speedTestEndpoint={settings.speed_test_endpoint}
             />
           )}
 
-          {currentPage === 'applications' && (
+          {(currentPage === 'applications' || currentPage === 'rules') && (
             <ApplicationsPage
               processes={processes}
               rules={rules}
               onToggleBlock={handleToggleBlock}
-              onSelectExclusive={(proc) => {
+              onSelectExclusive={(_proc) => {
                 setCurrentPage('exclusive');
               }}
-              onSetLimit={(proc) => {
-                setCurrentPage('rules');
-              }}
               onRefresh={refreshTelemetry}
+              onNotification={showNotification}
+            />
+          )}
+
+          {currentPage === 'services' && (
+            <WindowsServicesPage
+              onNotification={showNotification}
             />
           )}
 
@@ -320,22 +276,6 @@ export function App() {
             />
           )}
 
-          {currentPage === 'analytics' && (
-            <AnalyticsPage
-              analytics={analytics}
-              onExportCsv={handleExportCsv}
-            />
-          )}
-
-          {currentPage === 'rules' && (
-            <RulesPage
-              rules={rules}
-              onSaveRule={handleSaveRule}
-              onDeleteRule={handleDeleteRule}
-              onEmergencyRestore={handleEmergencyRestore}
-            />
-          )}
-
           {currentPage === 'settings' && (
             <SettingsPage
               settings={settings}
@@ -343,12 +283,12 @@ export function App() {
               onUpdateSettings={(newSettings) => {
                 setSettings(newSettings);
                 api.saveSettings(newSettings);
-                showNotification('Settings saved.');
               }}
               onEmergencyRestore={handleEmergencyRestore}
               onResetDatabase={() => {
                 showNotification('Database reset.');
               }}
+              onNotification={showNotification}
             />
           )}
         </main>

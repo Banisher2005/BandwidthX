@@ -1,29 +1,33 @@
 import React, { useState, useMemo } from 'react';
 import { 
   Search, 
-  Filter, 
   ArrowUpDown, 
   ShieldCheck, 
   ShieldX, 
-  Zap, 
   Sliders, 
-  ChevronDown, 
-  ChevronUp,
-  Globe,
-  Gauge,
-  X,
-  Info
+  Globe, 
+  X, 
+  Info, 
+  Skull, 
+  AlertTriangle, 
+  RotateCw, 
+  CheckCircle2, 
+  Layers,
+  ArrowDown,
+  ArrowUp,
+  Radio
 } from 'lucide-react';
 import { ProcessNetworkInfo, NetworkRule } from '../../types';
 import { formatBytes, formatSpeed, truncateMiddle } from '../../utils/format';
+import { api } from '../../services/api';
 
 interface ApplicationsPageProps {
   processes: ProcessNetworkInfo[];
   rules: NetworkRule[];
   onToggleBlock: (process: ProcessNetworkInfo) => void;
   onSelectExclusive: (process: ProcessNetworkInfo) => void;
-  onSetLimit: (process: ProcessNetworkInfo) => void;
   onRefresh: () => void;
+  onNotification: (msg: string) => void;
 }
 
 type SortField = 'speed' | 'download' | 'upload' | 'total' | 'name' | 'pid' | 'connections';
@@ -33,17 +37,18 @@ export const ApplicationsPage: React.FC<ApplicationsPageProps> = ({
   rules,
   onToggleBlock,
   onSelectExclusive,
-  onSetLimit,
   onRefresh,
+  onNotification,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
-  const [filterType, setFilterType] = useState<'all' | 'active' | 'blocked' | 'rules'>('all');
+  const [filterType, setFilterType] = useState<'all' | 'active' | 'blocked' | 'allowed' | 'recent'>('all');
   const [sortField, setSortField] = useState<SortField>('speed');
   const [sortAsc, setSortAsc] = useState(false);
   const [selectedProcess, setSelectedProcess] = useState<ProcessNetworkInfo | null>(null);
-  const [limitModalProc, setLimitModalProc] = useState<ProcessNetworkInfo | null>(null);
-  const [limitValueKbps, setLimitValueKbps] = useState('2048');
-  const [limitType, setLimitType] = useState<'download_limit' | 'upload_limit' | 'bidirectional_limit'>('download_limit');
+  
+  // Terminate confirmation state
+  const [terminateTarget, setTerminateTarget] = useState<ProcessNetworkInfo | null>(null);
+  const [isTerminating, setIsTerminating] = useState(false);
 
   // Filter & sort logic
   const filteredProcesses = useMemo(() => {
@@ -59,13 +64,16 @@ export const ApplicationsPage: React.FC<ApplicationsPageProps> = ({
 
       // Filter tabs
       if (filterType === 'active') {
-        return proc.download_bytes_sec > 0 || proc.upload_bytes_sec > 0 || proc.connection_count > 0;
+        return proc.download_bytes_sec > 0 || proc.upload_bytes_sec > 0;
       }
       if (filterType === 'blocked') {
         return proc.is_blocked;
       }
-      if (filterType === 'rules') {
-        return proc.has_rules;
+      if (filterType === 'allowed') {
+        return !proc.is_blocked;
+      }
+      if (filterType === 'recent') {
+        return proc.connection_count > 0 || proc.total_download_bytes > 0;
       }
       return true;
     }).sort((a, b) => {
@@ -102,292 +110,406 @@ export const ApplicationsPage: React.FC<ApplicationsPageProps> = ({
     }
   };
 
+  const executeTermination = async () => {
+    if (!terminateTarget) return;
+
+    try {
+      setIsTerminating(true);
+      await api.terminateProcess(terminateTarget.pid, terminateTarget.creation_time);
+      onNotification(`Successfully terminated ${terminateTarget.name} (PID ${terminateTarget.pid})`);
+      setTerminateTarget(null);
+      if (selectedProcess?.pid === terminateTarget.pid) {
+        setSelectedProcess(null);
+      }
+      onRefresh();
+    } catch (err: any) {
+      onNotification(`Termination failed: ${err?.message || err}`);
+    } finally {
+      setIsTerminating(false);
+    }
+  };
+
   return (
-    <div className="space-y-4">
-      {/* Search, Filter & Refresh Bar */}
-      <div className="flex flex-col md:flex-row items-center justify-between gap-3 p-4 rounded-xl bg-[#12191A] border border-[#192223]">
-        {/* Search */}
-        <div className="relative w-full md:w-80">
-          <Search className="w-4 h-4 text-[#91A39A] absolute left-3.5 top-1/2 -translate-y-1/2" />
-          <input
+    <div className="space-y-6 max-w-6xl mx-auto pb-10">
+      {/* Header and Summary */}
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div>
+          <div className="flex items-center space-x-2.5">
+            <div className="p-2 rounded-xl bg-accent-primary/15 border border-accent-primary/30 text-accent-primary">
+              <Layers className="w-5 h-5" />
+            </div>
+            <div>
+              <h2 className="text-xl font-bold text-content-primary tracking-tight">Active Applications</h2>
+              <p className="text-xs text-content-secondary mt-0.5">
+                Real-time per-process socket attribution via Windows TCP EStats.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {/* Telemetry Source Tooltip / Notice */}
+        <div className="flex items-center space-x-2 text-xs">
+          <div 
+            className="px-3 py-1.5 rounded-xl glass-card text-content-secondary flex items-center space-x-1.5 cursor-help"
+            title="TCP bytes are measured directly from live socket counters (TcpConnectionEstatsData). UDP sockets are tracked by endpoint presence; per-process UDP byte counts require kernel callout driver."
+          >
+            <Info className="w-3.5 h-3.5 text-accent-secondary" />
+            <span>TCP EStats Verified</span>
+          </div>
+
+          <button 
+            onClick={onRefresh}
+            className="p-1.5 rounded-xl glass-card text-content-secondary hover:text-content-primary glass-card-hover"
+            title="Refresh Process List"
+          >
+            <RotateCw className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      </div>
+
+      {/* Search Bar & Filters */}
+      <div className="flex flex-col sm:flex-row gap-3">
+        <div className="relative flex-1">
+          <Search className="w-4 h-4 text-content-muted absolute left-3.5 top-1/2 -translate-y-1/2" />
+          <input 
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search processes, PID, or path..."
-            className="w-full pl-10 pr-4 py-2 rounded-lg bg-[#0B0F10] border border-[#192223] text-sm text-[#EDF5F0] placeholder-[#62736A] focus:outline-none focus:border-[#91DB79]/50 transition-colors"
+            placeholder="Search process by name, PID, or executable path..."
+            className="w-full pl-10 pr-4 py-2.5 rounded-2xl glass-card bg-white/[0.03] text-sm text-content-primary placeholder:text-content-muted focus:outline-none focus:border-accent-primary/50 transition-colors"
           />
         </div>
 
-        {/* Filter Tabs */}
-        <div className="flex items-center space-x-1.5 self-start md:self-auto overflow-x-auto w-full md:w-auto">
-          {[
-            { id: 'all', label: `All (${processes.length})` },
-            { id: 'active', label: 'Active Now' },
-            { id: 'blocked', label: 'Blocked' },
-            { id: 'rules', label: 'With Rules' },
-          ].map((tab) => (
+        <div className="flex items-center space-x-1.5 p-1 rounded-2xl glass-card shrink-0 text-xs overflow-x-auto">
+          {(['all', 'active', 'blocked', 'allowed', 'recent'] as const).map((t) => (
             <button
-              key={tab.id}
-              onClick={() => setFilterType(tab.id as any)}
-              className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-                filterType === tab.id
-                  ? 'bg-[#192223] text-[#91DB79] border border-[#91DB79]/30'
-                  : 'text-[#91A39A] hover:bg-[#192223]/50 hover:text-[#EDF5F0]'
+              key={t}
+              onClick={() => setFilterType(t)}
+              className={`px-3 py-1.5 rounded-xl font-medium capitalize transition-all whitespace-nowrap ${
+                filterType === t 
+                  ? 'bg-accent-primary text-background font-bold shadow-md' 
+                  : 'text-content-secondary hover:text-content-primary'
               }`}
             >
-              {tab.label}
+              {t === 'active' ? 'Using Network' : t}
             </button>
           ))}
         </div>
       </div>
 
       {/* Applications Table */}
-      <div className="rounded-xl bg-[#12191A] border border-[#192223] overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs">
-            <thead className="bg-[#0B0F10]/60 border-b border-[#192223] text-[#91A39A] font-mono select-none">
-              <tr>
-                <th className="py-3 px-4 cursor-pointer hover:text-[#EDF5F0]" onClick={() => handleSort('name')}>
-                  <div className="flex items-center space-x-1">
-                    <span>Application / Executable</span>
-                    {sortField === 'name' && (sortAsc ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />)}
-                  </div>
-                </th>
-                <th className="py-3 px-3 cursor-pointer hover:text-[#EDF5F0]" onClick={() => handleSort('pid')}>
-                  <div className="flex items-center space-x-1">
-                    <span>PID</span>
-                    {sortField === 'pid' && (sortAsc ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />)}
-                  </div>
-                </th>
-                <th className="py-3 px-3 cursor-pointer hover:text-[#EDF5F0]" onClick={() => handleSort('download')}>
-                  <div className="flex items-center space-x-1">
-                    <span>Download</span>
-                    {sortField === 'download' && (sortAsc ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />)}
-                  </div>
-                </th>
-                <th className="py-3 px-3 cursor-pointer hover:text-[#EDF5F0]" onClick={() => handleSort('upload')}>
-                  <div className="flex items-center space-x-1">
-                    <span>Upload</span>
-                    {sortField === 'upload' && (sortAsc ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />)}
-                  </div>
-                </th>
-                <th className="py-3 px-3 cursor-pointer hover:text-[#EDF5F0]" onClick={() => handleSort('total')}>
-                  <div className="flex items-center space-x-1">
-                    <span>Total Data</span>
-                    {sortField === 'total' && (sortAsc ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />)}
-                  </div>
-                </th>
-                <th className="py-3 px-3 cursor-pointer hover:text-[#EDF5F0]" onClick={() => handleSort('connections')}>
-                  <div className="flex items-center space-x-1">
-                    <span>Sockets</span>
-                    {sortField === 'connections' && (sortAsc ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />)}
-                  </div>
-                </th>
-                <th className="py-3 px-3">Status</th>
-                <th className="py-3 px-4 text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-[#192223]/60 font-sans">
-              {filteredProcesses.length === 0 ? (
-                <tr>
-                  <td colSpan={8} className="py-12 text-center text-[#91A39A]">
-                    No matching applications found.
-                  </td>
+      <div className="rounded-3xl glass-card overflow-hidden">
+        {filteredProcesses.length === 0 ? (
+          <div className="py-16 text-center text-content-muted text-sm">
+            No applications match your filter criteria.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs border-collapse">
+              <thead>
+                <tr className="border-b border-white/[0.06] text-content-muted uppercase tracking-wider font-mono text-[10px]">
+                  <th 
+                    onClick={() => handleSort('name')}
+                    className="py-3.5 px-4 font-semibold cursor-pointer hover:text-content-primary select-none"
+                  >
+                    <div className="flex items-center space-x-1">
+                      <span>Application</span>
+                      <ArrowUpDown className="w-3 h-3 opacity-60" />
+                    </div>
+                  </th>
+                  <th 
+                    onClick={() => handleSort('pid')}
+                    className="py-3.5 px-3 font-semibold cursor-pointer hover:text-content-primary select-none"
+                  >
+                    PID
+                  </th>
+                  <th 
+                    onClick={() => handleSort('download')}
+                    className="py-3.5 px-3 font-semibold cursor-pointer hover:text-content-primary select-none"
+                  >
+                    <div className="flex items-center space-x-1">
+                      <span>Download</span>
+                      <ArrowDown className="w-3 h-3 text-accent-primary" />
+                    </div>
+                  </th>
+                  <th 
+                    onClick={() => handleSort('upload')}
+                    className="py-3.5 px-3 font-semibold cursor-pointer hover:text-content-primary select-none"
+                  >
+                    <div className="flex items-center space-x-1">
+                      <span>Upload</span>
+                      <ArrowUp className="w-3 h-3 text-accent-secondary" />
+                    </div>
+                  </th>
+                  <th 
+                    onClick={() => handleSort('total')}
+                    className="py-3.5 px-3 font-semibold cursor-pointer hover:text-content-primary select-none"
+                  >
+                    Total
+                  </th>
+                  <th className="py-3.5 px-3 font-semibold">Status</th>
+                  <th className="py-3.5 px-4 font-semibold text-right">Actions</th>
                 </tr>
-              ) : (
-                filteredProcesses.map((proc) => {
+              </thead>
+              <tbody className="divide-y divide-white/[0.04]">
+                {filteredProcesses.map((proc) => {
+                  const hasActiveSpeed = proc.download_bytes_sec > 0 || proc.upload_bytes_sec > 0;
+                  const isBlocked = proc.is_blocked;
+                  const isExclusive = proc.is_exclusive_target;
+
                   return (
-                    <tr
+                    <tr 
                       key={`${proc.pid}-${proc.name}`}
-                      className="hover:bg-[#192223]/40 transition-colors cursor-pointer group"
+                      className="hover:bg-white/[0.025] transition-colors group cursor-pointer"
                       onClick={() => setSelectedProcess(proc)}
                     >
-                      {/* Name & Exe */}
-                      <td className="py-3 px-4">
-                        <div className="flex items-center space-x-3">
-                          <div className="w-8 h-8 rounded-lg bg-[#192223] border border-[#212D2E] flex items-center justify-center font-mono font-bold text-xs text-[#91DB79] uppercase shrink-0">
-                            {proc.name.slice(0, 2)}
+                      {/* Name & Path */}
+                      <td className="py-3 px-4 max-w-xs">
+                        <div className="flex items-center space-x-2.5">
+                          <div className="w-7 h-7 rounded-lg bg-white/[0.05] border border-white/[0.08] flex items-center justify-center shrink-0">
+                            <Globe className="w-3.5 h-3.5 text-accent-secondary" />
                           </div>
                           <div className="min-w-0">
-                            <div className="font-semibold text-[#EDF5F0] truncate flex items-center gap-1.5">
-                              {proc.name}
-                              {proc.is_exclusive_target && (
-                                <span className="text-[10px] uppercase font-mono px-1 py-0.2 rounded bg-[#EF6B70]/20 text-[#EF6B70] border border-[#EF6B70]/30 font-bold">
-                                  EXCLUSIVE
+                            <div className="font-semibold text-content-primary truncate flex items-center space-x-1.5">
+                              <span>{proc.name}</span>
+                              {isExclusive && (
+                                <span className="text-[9px] px-1.5 py-0.2 rounded bg-accent-primary text-background font-bold">
+                                  TARGET
                                 </span>
                               )}
                             </div>
-                            <div className="text-[11px] font-mono text-[#91A39A]/70 truncate max-w-xs" title={proc.exe_path}>
-                              {truncateMiddle(proc.exe_path, 45)}
+                            <div className="text-[10px] font-mono text-content-muted truncate" title={proc.exe_path}>
+                              {truncateMiddle(proc.exe_path, 36)}
                             </div>
                           </div>
                         </div>
                       </td>
 
                       {/* PID */}
-                      <td className="py-3 px-3 font-mono text-[#91A39A]">
-                        {proc.pid}
-                      </td>
-
-                      {/* Download */}
-                      <td className="py-3 px-3 font-mono">
-                        <span className={proc.download_bytes_sec > 0 ? 'text-[#91DB79] font-semibold' : 'text-[#91A39A]/60'}>
-                          {formatSpeed(proc.download_bytes_sec)}
+                      <td className="py-3 px-3 font-mono text-content-secondary">
+                        <span className="px-1.5 py-0.5 rounded bg-white/[0.04] border border-white/[0.08]">
+                          {proc.pid}
                         </span>
                       </td>
 
-                      {/* Upload */}
-                      <td className="py-3 px-3 font-mono">
-                        <span className={proc.upload_bytes_sec > 0 ? 'text-[#57C7B5] font-semibold' : 'text-[#91A39A]/60'}>
-                          {formatSpeed(proc.upload_bytes_sec)}
-                        </span>
+                      {/* Download Throughput */}
+                      <td className="py-3 px-3 font-mono font-medium">
+                        {proc.download_bytes_sec > 0 ? (
+                          <span className="text-accent-primary font-bold">
+                            {formatSpeed(proc.download_bytes_sec)}
+                          </span>
+                        ) : (
+                          <span className="text-content-muted">0 B/s</span>
+                        )}
                       </td>
 
-                      {/* Total */}
-                      <td className="py-3 px-3 font-mono text-[#EDF5F0]">
+                      {/* Upload Throughput */}
+                      <td className="py-3 px-3 font-mono font-medium">
+                        {proc.upload_bytes_sec > 0 ? (
+                          <span className="text-accent-secondary font-bold">
+                            {formatSpeed(proc.upload_bytes_sec)}
+                          </span>
+                        ) : (
+                          <span className="text-content-muted">0 B/s</span>
+                        )}
+                      </td>
+
+                      {/* Total Measured Traffic */}
+                      <td className="py-3 px-3 font-mono text-content-secondary">
                         {formatBytes(proc.total_download_bytes + proc.total_upload_bytes)}
                       </td>
 
-                      {/* Sockets */}
-                      <td className="py-3 px-3 font-mono text-[#91A39A]">
-                        {proc.connection_count}
-                      </td>
-
-                      {/* Access Status */}
+                      {/* Status */}
                       <td className="py-3 px-3">
-                        {proc.is_blocked ? (
-                          <span className="inline-flex items-center space-x-1 px-2 py-0.5 rounded text-[11px] font-mono bg-[#EF6B70]/15 text-[#EF6B70] border border-[#EF6B70]/30">
-                            <ShieldX className="w-3 h-3" />
-                            <span>BLOCKED</span>
+                        {isBlocked ? (
+                          <span className="inline-flex items-center space-x-1 text-status-danger font-semibold text-[11px]">
+                            <ShieldX className="w-3.5 h-3.5" />
+                            <span>Blocked</span>
                           </span>
-                        ) : proc.has_rules ? (
-                          <span className="inline-flex items-center space-x-1 px-2 py-0.5 rounded text-[11px] font-mono bg-[#E9B65C]/15 text-[#E9B65C] border border-[#E9B65C]/30" title="Rate profile saved (packet-shaping unsupported in user-mode WFP ALE)">
-                            <Sliders className="w-3 h-3" />
-                            <span>LIMIT PROFILE (UNENFORCED)</span>
+                        ) : hasActiveSpeed ? (
+                          <span className="inline-flex items-center space-x-1 text-accent-primary font-semibold text-[11px]">
+                            <span className="w-1.5 h-1.5 rounded-full bg-accent-primary animate-pulse"></span>
+                            <span>Active</span>
                           </span>
                         ) : (
-                          <span className="inline-flex items-center space-x-1 px-2 py-0.5 rounded text-[11px] font-mono bg-[#91DB79]/15 text-[#91DB79] border border-[#91DB79]/30">
-                            <Globe className="w-3 h-3" />
-                            <span>ALLOWED</span>
+                          <span className="text-content-muted text-[11px]">
+                            Idle ({proc.connection_count} sockets)
                           </span>
                         )}
                       </td>
 
-                      {/* Actions */}
+                      {/* Separate Actions: Block/Allow, Terminate */}
                       <td className="py-3 px-4 text-right" onClick={(e) => e.stopPropagation()}>
-                        <div className="flex items-center justify-end space-x-2">
-                          {/* Toggle Allow / Block */}
+                        <div className="flex items-center justify-end space-x-1.5">
+                          {/* Block / Allow Toggle */}
                           <button
                             onClick={() => onToggleBlock(proc)}
-                            className={`p-1.5 rounded-lg border transition-colors ${
-                              proc.is_blocked
-                                ? 'bg-[#91DB79]/15 text-[#91DB79] border-[#91DB79]/40 hover:bg-[#91DB79]/25'
-                                : 'bg-[#EF6B70]/15 text-[#EF6B70] border-[#EF6B70]/40 hover:bg-[#EF6B70]/25'
+                            className={`px-2.5 py-1 rounded-xl text-[11px] font-medium transition-all ${
+                              isBlocked
+                                ? 'bg-status-danger/15 hover:bg-status-danger/25 text-status-danger border border-status-danger/30'
+                                : 'bg-white/[0.04] hover:bg-white/[0.08] text-content-secondary hover:text-content-primary border border-white/[0.08]'
                             }`}
-                            title={proc.is_blocked ? 'Unblock Internet' : 'Block Internet Access'}
+                            title={isBlocked ? "Allow Network Access" : "Block Network Access via WFP"}
                           >
-                            {proc.is_blocked ? <ShieldCheck className="w-3.5 h-3.5" /> : <ShieldX className="w-3.5 h-3.5" />}
+                            {isBlocked ? 'Allow' : 'Block'}
                           </button>
 
-                          {/* Set Limit */}
+                          {/* Terminate Process */}
                           <button
-                            onClick={() => setLimitModalProc(proc)}
-                            className="p-1.5 rounded-lg bg-[#192223] hover:bg-[#212D2E] text-[#91A39A] hover:text-[#EDF5F0] border border-[#212D2E] transition-colors"
-                            title="Configure Bandwidth Limits"
+                            onClick={() => setTerminateTarget(proc)}
+                            className="p-1.5 rounded-xl bg-status-danger/10 hover:bg-status-danger/25 text-status-danger border border-status-danger/20 transition-all"
+                            title={`Terminate ${proc.name} (PID ${proc.pid})`}
                           >
-                            <Gauge className="w-3.5 h-3.5" />
-                          </button>
-
-                          {/* Exclusive Mode Button */}
-                          <button
-                            onClick={() => onSelectExclusive(proc)}
-                            className="px-2.5 py-1 rounded-lg bg-[#192223] hover:bg-[#91DB79]/20 hover:text-[#91DB79] text-[#EDF5F0] border border-[#212D2E] text-xs font-medium transition-colors flex items-center space-x-1"
-                            title="Select for Exclusive Mode"
-                          >
-                            <Zap className="w-3 h-3" />
-                            <span>Exclusive</span>
+                            <Skull className="w-3.5 h-3.5" />
                           </button>
                         </div>
                       </td>
                     </tr>
                   );
-                })
-              )}
-            </tbody>
-          </table>
-        </div>
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
-      {/* Rate Limit Modal */}
-      {limitModalProc && (
-        <div className="fixed inset-0 bg-[#0B0F10]/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-[#12191A] border border-[#192223] rounded-2xl w-full max-w-md p-6 space-y-4 shadow-2xl">
-            <div className="flex items-center justify-between pb-3 border-b border-[#192223]">
-              <div className="flex items-center space-x-2">
-                <Gauge className="w-5 h-5 text-[#91DB79]" />
-                <h3 className="text-base font-bold text-[#EDF5F0]">Configure Bandwidth Limit</h3>
+
+      {/* ----------------------------------------------------------------- */}
+      {/* TERMINATE CONFIRMATION MODAL                                      */}
+      {/* ----------------------------------------------------------------- */}
+      {terminateTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-background/80 backdrop-blur-md">
+          <div className="max-w-md w-full rounded-3xl glass-panel-elevated p-6 border border-status-danger/30 shadow-2xl space-y-4 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center space-x-3 text-status-danger">
+              <div className="p-2.5 rounded-2xl bg-status-danger/15 border border-status-danger/30">
+                <AlertTriangle className="w-5 h-5" />
               </div>
-              <button onClick={() => setLimitModalProc(null)} className="text-[#91A39A] hover:text-[#EDF5F0]">
+              <div>
+                <h3 className="text-base font-bold text-content-primary">Confirm Termination</h3>
+                <p className="text-xs text-content-secondary">This action cannot be undone.</p>
+              </div>
+            </div>
+
+            <p className="text-xs text-content-secondary leading-relaxed">
+              Are you sure you want to terminate <strong className="text-content-primary font-mono">{terminateTarget.name}</strong> (PID {terminateTarget.pid})?
+              Only this specific process instance will be terminated.
+            </p>
+
+            <div className="p-3 rounded-2xl bg-white/[0.025] border border-white/[0.06] font-mono text-[11px] text-content-muted break-all">
+              {terminateTarget.exe_path}
+            </div>
+
+            <div className="flex justify-end space-x-3 pt-2">
+              <button
+                onClick={() => setTerminateTarget(null)}
+                disabled={isTerminating}
+                className="px-4 py-2 rounded-xl glass-card text-content-secondary text-xs hover:text-content-primary"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={executeTermination}
+                disabled={isTerminating}
+                className="flex items-center space-x-1.5 px-4 py-2 rounded-xl bg-status-danger hover:bg-status-danger/90 text-background font-bold text-xs shadow-lg transition-all"
+              >
+                {isTerminating ? (
+                  <>
+                    <RotateCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>Terminating...</span>
+                  </>
+                ) : (
+                  <>
+                    <Skull className="w-3.5 h-3.5" />
+                    <span>Terminate Process</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ----------------------------------------------------------------- */}
+      {/* APPLICATION DETAILS DRAWER / MODAL                                */}
+      {/* ----------------------------------------------------------------- */}
+      {selectedProcess && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-background/80 backdrop-blur-md">
+          <div className="max-w-lg w-full rounded-3xl glass-panel-elevated p-6 border border-white/10 shadow-2xl space-y-5 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-start justify-between">
+              <div>
+                <div className="flex items-center space-x-2">
+                  <Globe className="w-4 h-4 text-accent-secondary" />
+                  <h3 className="text-base font-bold text-content-primary tracking-tight">
+                    {selectedProcess.name}
+                  </h3>
+                </div>
+                <div className="text-xs font-mono text-content-muted mt-0.5">
+                  PID: {selectedProcess.pid} • Sockets: {selectedProcess.connection_count}
+                </div>
+              </div>
+              <button 
+                onClick={() => setSelectedProcess(null)}
+                className="p-1 rounded-xl text-content-muted hover:text-content-primary glass-card"
+              >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
             <div className="space-y-3 text-xs">
-              <div className="p-3 rounded-lg bg-[#0B0F10] border border-[#192223]">
-                <div className="font-semibold text-sm text-[#EDF5F0]">{limitModalProc.name}</div>
-                <div className="text-[11px] font-mono text-[#91A39A] truncate">{limitModalProc.exe_path}</div>
+              <div className="p-3 rounded-2xl bg-white/[0.025] border border-white/[0.06] space-y-2">
+                <div className="flex justify-between">
+                  <span className="text-content-secondary">Current Download</span>
+                  <span className="font-mono font-bold text-accent-primary">{formatSpeed(selectedProcess.download_bytes_sec)}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-content-secondary">Current Upload</span>
+                  <span className="font-mono font-bold text-accent-secondary">{formatSpeed(selectedProcess.upload_bytes_sec)}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-content-secondary">Total Inbound</span>
+                  <span className="font-mono text-content-primary">{formatBytes(selectedProcess.total_download_bytes)}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-content-secondary">Total Outbound</span>
+                  <span className="font-mono text-content-primary">{formatBytes(selectedProcess.total_upload_bytes)}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-content-secondary">TCP Connections</span>
+                  <span className="font-mono text-content-primary">{selectedProcess.active_tcp_connections}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-content-secondary">UDP Endpoints</span>
+                  <span className="font-mono text-content-primary">{selectedProcess.active_udp_endpoints}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-content-secondary">WFP Policy</span>
+                  <span className={`font-semibold ${selectedProcess.is_blocked ? 'text-status-danger' : 'text-accent-primary'}`}>
+                    {selectedProcess.is_blocked ? 'BLOCKED (Kernel ALE)' : 'ALLOWED'}
+                  </span>
+                </div>
               </div>
 
-              <div>
-                <label className="block text-[#91A39A] mb-1">Limit Type</label>
-                <select
-                  value={limitType}
-                  onChange={(e) => setLimitType(e.target.value as any)}
-                  className="w-full px-3 py-2 rounded-lg bg-[#0B0F10] border border-[#192223] text-xs text-[#EDF5F0] focus:outline-none focus:border-[#91DB79]"
-                >
-                  <option value="download_limit">Download Limit (Inbound)</option>
-                  <option value="upload_limit">Upload Limit (Outbound)</option>
-                  <option value="bidirectional_limit">Bidirectional Limit</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-[#91A39A] mb-1">Speed Cap (KB/s)</label>
-                <input
-                  type="number"
-                  min="64"
-                  step="64"
-                  value={limitValueKbps}
-                  onChange={(e) => setLimitValueKbps(e.target.value)}
-                  className="w-full px-3 py-2 rounded-lg bg-[#0B0F10] border border-[#192223] text-xs text-[#EDF5F0] focus:outline-none focus:border-[#91DB79]"
-                />
-              </div>
-
-              <div className="p-3 rounded-lg bg-[#E9B65C]/10 border border-[#E9B65C]/30 flex items-start space-x-2 text-[11px] text-[#E9B65C]">
-                <Info className="w-4 h-4 shrink-0 mt-0.5" />
-                <span>
-                  <strong>Note on Bandwidth Shaping:</strong> Windows user-mode ALE layers enforce binary authorization (Allow/Block). Rate limits are saved as monitoring threshold profiles; active packet transmission pacing requires a kernel NDIS callout driver. Use <strong>Block</strong> or <strong>Exclusive Mode</strong> for active kernel-enforced restriction.
+              <div className="p-3 rounded-2xl bg-white/[0.025] border border-white/[0.06] space-y-1">
+                <span className="text-content-secondary block text-[11px]">Executable Path</span>
+                <span className="font-mono text-[11px] text-content-primary break-all select-all block">
+                  {selectedProcess.exe_path}
                 </span>
               </div>
+            </div>
 
-              <div className="pt-2 flex items-center justify-end space-x-3">
-                <button
-                  type="button"
-                  onClick={() => setLimitModalProc(null)}
-                  className="px-4 py-2 rounded-lg bg-[#192223] hover:bg-[#212D2E] text-[#EDF5F0]"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    onSetLimit(limitModalProc);
-                    setLimitModalProc(null);
-                  }}
-                  className="px-4 py-2 rounded-lg bg-[#E9B65C] hover:bg-[#E9B65C]/90 text-[#0B0F10] font-bold"
-                >
-                  Save Limit Profile (Informational)
-                </button>
-              </div>
+            <div className="flex items-center justify-between pt-2">
+              <button
+                onClick={() => onSelectExclusive(selectedProcess)}
+                className="flex items-center space-x-1.5 px-4 py-2 rounded-xl bg-accent-primary/10 hover:bg-accent-primary/20 text-accent-primary border border-accent-primary/30 text-xs font-semibold transition-all"
+              >
+                <span>Target in Exclusive Mode</span>
+              </button>
+
+              <button
+                onClick={() => setSelectedProcess(null)}
+                className="px-5 py-2 rounded-xl glass-card text-content-primary font-medium text-xs hover:bg-white/[0.08]"
+              >
+                Close
+              </button>
             </div>
           </div>
         </div>

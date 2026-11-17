@@ -1,4 +1,12 @@
-export type PageType = 'overview' | 'applications' | 'exclusive' | 'analytics' | 'rules' | 'settings';
+export type PageType = 
+  | 'network' 
+  | 'applications' 
+  | 'services' 
+  | 'exclusive' 
+  | 'settings' 
+  | 'overview' 
+  | 'analytics' 
+  | 'rules';
 
 export type RuleType = 
   | 'allow' 
@@ -98,9 +106,41 @@ export interface AppSettings {
   start_with_windows: boolean;
   start_minimized: boolean;
   monitoring_interval_ms: number;
+  speed_test_endpoint?: string;
   data_retention_days: number;
   selected_adapter: string;
   notifications_enabled: boolean;
   theme: string;
   fail_safe_timeout_seconds: number;
+}
+
+export interface SpeedTestProgress {
+  is_running: boolean;
+  phase: 'idle' | 'latency' | 'download' | 'upload' | 'completed' | 'cancelled' | 'error';
+  progress_percent: number;
+  ping_ms: number;
+  jitter_ms: number;
+  download_speed_bps: number;
+  upload_speed_bps: number;
+  current_throughput_bps: number;
+  bytes_transferred: number;
+  server_name: string;
+  error_message?: string | null;
+  timestamp?: string | null;
+}
+
+export type ServiceSafetyClassification = 'Protected' | 'System' | 'User' | 'Unknown';
+
+export interface WindowsServiceInfo {
+  service_name: string;
+  display_name: string;
+  pid: number | null;
+  exe_path: string | null;
+  status: string;
+  startup_type: string;
+  description: string;
+  classification: ServiceSafetyClassification;
+  can_stop: boolean;
+  can_start: boolean;
+  can_restart: boolean;
 }

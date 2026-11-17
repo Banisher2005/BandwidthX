@@ -32,6 +32,18 @@ export function formatBitsSpeed(bytesPerSec: number, decimals = 1): string {
   return `${val} ${sizes[i] || 'Gbps'}`;
 }
 
+export function formatBitsSpeedParts(bytesPerSec: number, decimals = 1): { value: string; unit: string } {
+  const bits = bytesPerSec * 8;
+  if (bits <= 0 || isNaN(bits)) return { value: '0.0', unit: 'Mbps' };
+  const k = 1000;
+  const dm = decimals < 0 ? 0 : decimals;
+  const sizes = ['bps', 'Kbps', 'Mbps', 'Gbps'];
+  const i = Math.max(2, Math.floor(Math.log(bits) / Math.log(k))); // Default to at least Mbps for hero view
+  const unitIndex = Math.min(i, sizes.length - 1);
+  const val = (bits / Math.pow(k, unitIndex)).toFixed(dm);
+  return { value: val, unit: sizes[unitIndex] };
+}
+
 export function truncateMiddle(text: string, maxLength: number): string {
   if (!text || text.length <= maxLength) return text;
   const half = Math.floor((maxLength - 3) / 2);
