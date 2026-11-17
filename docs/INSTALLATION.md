@@ -2,7 +2,7 @@
 
 ## Download
 
-Download **BandwidthX_2.3.0_x64-setup.exe** from the [latest GitHub Release](https://github.com/Banisher2005/BandwidthX/releases/latest).
+Download **BandwidthX_3.0.0_x64-setup.exe** from the [latest GitHub Release](https://github.com/Banisher2005/BandwidthX/releases/latest).
 
 ## Install
 
