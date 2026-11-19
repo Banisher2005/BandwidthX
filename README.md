@@ -8,9 +8,30 @@ BandwidthX 3.0 delivers a glassmorphic Windows 11 interface, real dual-stack net
 
 ---
 
-## Download & Install (Windows)
+## Download for Windows
 
-Download the Windows setup executable from the [latest GitHub Release](https://github.com/Banisher2005/BandwidthX/releases/latest). The installer registers and starts the privileged BandwidthX service automatically; no manual service commands or development toolchain are required. See [docs/INSTALLATION.md](docs/INSTALLATION.md) for installation, UAC, and uninstall details.
+| Asset | Link | Size | SHA-256 Checksum |
+| :--- | :--- | :--- | :--- |
+| **Official Installer (.exe)** | [**Download BandwidthX 3.0.0 Setup**](https://github.com/Banisher2005/BandwidthX/releases/download/v3.0.0/BandwidthX_3.0.0_x64-setup.exe) | ~3.88 MB | `91FBC8272D78C6B05D31C6EAB3B72E3FA541760F19E8E7F6D6AA5CA6A9D725A1` |
+| **GitHub Release** | [**BandwidthX 3.0.0 — Windows Release**](https://github.com/Banisher2005/BandwidthX/releases/tag/v3.0.0) | — | See release notes and checksum files |
+
+### Installation Instructions
+1. Download **`BandwidthX_3.0.0_x64-setup.exe`** from the link above.
+2. Run the installer and approve the Windows User Account Control (UAC) prompt. BandwidthX installs per-machine to configure Windows Filtering Platform policies.
+3. The installer registers and starts the privileged **BandwidthX** Windows service automatically.
+4. Launch BandwidthX from the Start Menu or Desktop.
+
+### Uninstallation
+To uninstall, open **Windows Settings → Apps → Installed apps → BandwidthX → Uninstall**. The uninstaller automatically stops and removes the BandwidthX service before removing application files. See [docs/INSTALLATION.md](docs/INSTALLATION.md) for full installation and service lifecycle details.
+
+---
+
+## Basic Usage
+
+- **Network Page**: Click **Start Speed Test** to measure latency, jitter, download, and upload speeds against high-speed CDN edges. View always-on real-time throughput on your active network interface with the 60-second rolling chart.
+- **Applications Page**: Inspect real per-process inbound and outbound speeds. Click **Block** to sever network access for any untrusted process, or **Terminate** with PID validation to stop runaway processes.
+- **Windows Services Page**: Browse system services categorized by safety levels (`Protected`, `System`, `User`). Critical core services are shielded against accidental stoppage.
+- **Exclusive Mode**: Choose a single game or critical process and enable Exclusive Mode. All background applications are restricted at the WFP ALE layer while preserving system networking (DNS, DHCP, loopback). Click **Emergency Restore** at any time to restore normal networking.
 
 ---
 
@@ -44,12 +65,11 @@ Dedicate your entire network interface to a single prioritized application. All 
 
 ---
 
-## Design System
+## Known Limitations
 
-BandwidthX 3.0 introduces a modern, minimal, glassmorphic aesthetic inspired by Windows 11 utilities:
-- **Palette**: Deep charcoal backdrop (`#090D12`), elevated glass panels (`#101820` / `rgba(255, 255, 255, 0.03)`), with vibrant green (`#91DB79`), teal (`#57C7B5`), and red (`#EF6B70`) accents.
-- **Glassmorphism**: Backdrop blur (`backdrop-blur-xl`), fine borders (`rgba(255, 255, 255, 0.06)`), and subtle depth shadows.
-- **Fast.com Dominant Metrics**: Clean, prominent numerical displays with muted unit descriptors.
+- **Binary ALE Authorization**: Windows Filtering Platform ALE operates at connection authorization time (permit/block). Saved rate-limit profiles are policy targets and are not packet-level transmission pacing (which requires a kernel NDIS driver or Windows QoS). They are transparently labelled as unenforced in the UI.
+- **IPv6 Established Connection Teardown**: The Windows user-mode IP Helper API does not expose `SetTcp6Entry`. While unmanaged existing IPv6 connections cannot be forcibly torn down from user mode, all subsequent connection attempts and handshakes are blocked at the WFP ALE layer.
+- **Code Signing**: The installer binary is self-built and not signed with an EV Code Signing certificate. Windows SmartScreen may display an unknown publisher warning.
 
 ---
 
@@ -96,7 +116,7 @@ BandwidthX/
 
 ---
 
-## Getting Started
+## Getting Started (Developers)
 
 ### Prerequisites
 - Windows 10 or Windows 11 (x64)
@@ -126,15 +146,11 @@ npm run tauri dev
 npm run build
 cargo build --release --workspace
 
-# Build official MSI and NSIS installers
-npm run tauri build
+# Stage service binary and build official NSIS installer
+New-Item -ItemType Directory -Force src-tauri/resources | Out-Null
+Copy-Item target/release/bandwidthx-service.exe src-tauri/resources/bandwidthx-service.exe -Force
+npx tauri build --bundles nsis
 ```
-
-Generated Release Artifacts:
-- **Windows MSI Installer**: `target/release/bundle/msi/BandwidthX_3.0.0_x64_en-US.msi`
-- **Windows Setup Installer**: `target/release/bundle/nsis/BandwidthX_3.0.0_x64-setup.exe`
-- **Desktop Application**: `target/release/bandwidthx-app.exe`
-- **Standalone Service**: `target/release/bandwidthx-service.exe`
 
 ---
 

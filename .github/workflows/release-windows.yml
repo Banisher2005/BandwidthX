@@ -2,6 +2,10 @@ name: Build and publish Windows installer
 
 on:
   workflow_dispatch:
+  push:
+    tags:
+      - 'v3.*'
+      - 'v*'
 
 permissions:
   contents: write
@@ -13,43 +17,109 @@ jobs:
     steps:
       - name: Checkout release source
         uses: actions/checkout@v4
-        with:
-          ref: main
+
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
+
       - name: Set up stable Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
+
       - name: Install frontend dependencies
         run: npm ci
+
+      - name: Run automated test suite
+        run: cargo test --workspace --exclude bandwidthx-service
+
       - name: Build privileged Windows service
         run: cargo build --release -p bandwidthx-service
+
       - name: Stage service binary for the installer
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force src-tauri/resources | Out-Null
           Copy-Item target/release/bandwidthx-service.exe src-tauri/resources/bandwidthx-service.exe -Force
           if (!(Test-Path src-tauri/resources/bandwidthx-service.exe)) { throw "The BandwidthX service binary was not staged." }
+
       - name: Build NSIS setup executable
         run: npx tauri build --bundles nsis
-      - name: Verify installer output
+
+      - name: Verify installer output & generate checksums
         shell: pwsh
         run: |
           $installer = Get-ChildItem target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
           if (!$installer) { throw "Tauri did not produce a Windows setup executable." }
+          if ($installer.Length -lt 2MB) { throw "Installer is unexpectedly small: $($installer.Length) bytes" }
           Write-Host "Installer ready: $($installer.FullName) ($($installer.Length) bytes)"
+          
+          # Compute SHA-256 hash
+          $hash = (Get-FileHash -Path $installer.FullName -Algorithm SHA256).Hash
+          "$hash  $($installer.Name)" | Out-File -FilePath "$($installer.FullName).sha256" -Encoding ascii
+          "$hash  $($installer.Name)" | Out-File -FilePath "target/release/bundle/nsis/SHA256SUMS.txt" -Encoding ascii
+          Write-Host "Installer SHA256: $hash"
+
+      - name: Test installation and service registration
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          Write-Host "Running silent installation test..."
+          Start-Process -FilePath $installer.FullName -ArgumentList "/S" -Wait
+          Start-Sleep -Seconds 5
+
+          $installedDir = "$env:ProgramFiles\BandwidthX"
+          Write-Host "Verifying installation at $installedDir..."
+          if (!(Test-Path "$installedDir\BandwidthX.exe")) {
+            throw "Desktop executable not found in $installedDir"
+          }
+          if (!(Test-Path "$installedDir\resources\bandwidthx-service.exe")) {
+            throw "Service executable not found in $installedDir\resources"
+          }
+          Write-Host "Installer files verified successfully."
+
+          # Verify service registration in SCM
+          $scOutput = sc.exe query BandwidthX
+          Write-Host ($scOutput -join "`n")
+          if ($LASTEXITCODE -ne 0) {
+            throw "BandwidthX service is not registered in SCM."
+          }
+          Write-Host "Service registration verified."
+
+          # Test uninstallation
+          Write-Host "Testing uninstallation..."
+          if (Test-Path "$installedDir\uninstall.exe") {
+            Start-Process -FilePath "$installedDir\uninstall.exe" -ArgumentList "/S" -Wait
+            Start-Sleep -Seconds 5
+            sc.exe query BandwidthX
+            Write-Host "Uninstallation completed."
+          }
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BandwidthX-v3.0.0-Windows-Setup
+          path: |
+            target/release/bundle/nsis/*-setup.exe
+            target/release/bundle/nsis/*.sha256
+            target/release/bundle/nsis/SHA256SUMS.txt
+          if-no-files-found: error
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v3.0.0
-          name: BandwidthX v3.0.0
+          name: BandwidthX 3.0.0 — Windows Release
           target_commitish: main
-          generate_release_notes: true
+          draft: false
+          prerelease: false
+          body_path: RELEASE_NOTES.md
           fail_on_unmatched_files: true
-          files: target/release/bundle/nsis/*-setup.exe
+          files: |
+            target/release/bundle/nsis/*-setup.exe
+            target/release/bundle/nsis/*.sha256
+            target/release/bundle/nsis/SHA256SUMS.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

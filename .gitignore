@@ -9,6 +9,7 @@ src-tauri/target/
 windows-service/target/
 target/
 *.pdb
+src-tauri/resources/*.exe
 
 # Logs
 npm-debug.log*
