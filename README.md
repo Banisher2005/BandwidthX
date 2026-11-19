@@ -12,7 +12,7 @@ BandwidthX 3.0 delivers a glassmorphic Windows 11 interface, real dual-stack net
 
 | Asset | Link | Size | SHA-256 Checksum |
 | :--- | :--- | :--- | :--- |
-| **Official Installer (.exe)** | [**Download BandwidthX 3.0.0 Setup**](https://github.com/Banisher2005/BandwidthX/releases/download/v3.0.0/BandwidthX_3.0.0_x64-setup.exe) | ~3.88 MB | `91FBC8272D78C6B05D31C6EAB3B72E3FA541760F19E8E7F6D6AA5CA6A9D725A1` |
+| **Official Installer (.exe)** | [**Download BandwidthX 3.0.0 Setup**](https://github.com/Banisher2005/BandwidthX/releases/download/v3.0.0/BandwidthX_3.0.0_x64-setup.exe) | ~3.87 MB | See [Release Checksums](https://github.com/Banisher2005/BandwidthX/releases/tag/v3.0.0) |
 | **GitHub Release** | [**BandwidthX 3.0.0 — Windows Release**](https://github.com/Banisher2005/BandwidthX/releases/tag/v3.0.0) | — | See release notes and checksum files |
 
 ### Installation Instructions

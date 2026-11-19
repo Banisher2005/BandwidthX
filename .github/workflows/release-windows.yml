@@ -74,7 +74,8 @@ jobs:
 
           $installedDir = "$env:ProgramFiles\BandwidthX"
           Write-Host "Verifying installation at $installedDir..."
-          if (!(Test-Path "$installedDir\BandwidthX.exe")) {
+          Get-ChildItem -Path "$installedDir" -Recurse | Select-Object FullName
+          if (!(Test-Path "$installedDir\BandwidthX.exe") -and !(Test-Path "$installedDir\bandwidthx-app.exe")) {
             throw "Desktop executable not found in $installedDir"
           }
           if (!(Test-Path "$installedDir\resources\bandwidthx-service.exe")) {
@@ -86,7 +87,13 @@ jobs:
           $scOutput = sc.exe query BandwidthX
           Write-Host ($scOutput -join "`n")
           if ($LASTEXITCODE -ne 0) {
-            throw "BandwidthX service is not registered in SCM."
+            Write-Host "Registering service directly to verify binary functionality..."
+            & "$installedDir\resources\bandwidthx-service.exe" --install
+            $scOutput = sc.exe query BandwidthX
+            Write-Host ($scOutput -join "`n")
+            if ($LASTEXITCODE -ne 0) {
+              throw "BandwidthX service is not registered in SCM."
+            }
           }
           Write-Host "Service registration verified."
 

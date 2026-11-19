@@ -11,7 +11,7 @@ name = "bandwidthx_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [[bin]]
-name = "bandwidthx-app"
+name = "BandwidthX"
 path = "src/main.rs"
 test = false
 

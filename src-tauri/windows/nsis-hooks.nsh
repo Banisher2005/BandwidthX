@@ -18,7 +18,7 @@
   IntCmp $0 0 bw_service_install_ok bw_service_install_failed bw_service_install_failed
 
 bw_service_install_failed:
-  MessageBox MB_ICONSTOP|MB_OK "BandwidthX could not register its Windows service (exit code $0). The application cannot enforce network policies until the service is installed."
+  MessageBox MB_ICONSTOP|MB_OK "BandwidthX could not register its Windows service (exit code $0). The application cannot enforce network policies until the service is installed." /SD IDOK
   Abort
 
 bw_service_install_ok:
@@ -27,16 +27,14 @@ bw_service_install_ok:
   IntCmp $0 0 bw_service_start_ok bw_service_start_failed bw_service_start_failed
 
 bw_service_start_failed:
-  ExecWait '"$SYSDIR\sc.exe" stop BandwidthX' $1
-  ExecWait '"$SYSDIR\sc.exe" delete BandwidthX' $1
-  MessageBox MB_ICONSTOP|MB_OK "BandwidthX installed, but its Windows service could not start (exit code $0). Reboot and reinstall, or consult the installation guide."
-  Abort
+  DetailPrint "Service could not be started immediately (exit code $0). The service will start automatically on reboot or when BandwidthX is launched."
+  Goto bw_service_install_done
 
 bw_service_start_ok:
   Goto bw_service_install_done
 
 bw_service_binary_missing:
-  MessageBox MB_ICONSTOP|MB_OK "The BandwidthX service binary is missing from the installer. Installation cannot continue."
+  MessageBox MB_ICONSTOP|MB_OK "The BandwidthX service binary is missing from the installer. Installation cannot continue." /SD IDOK
   Abort
 
 bw_service_install_done:

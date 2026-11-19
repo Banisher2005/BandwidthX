@@ -2,6 +2,7 @@
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "BandwidthX",
   "version": "3.0.0",
+  "mainBinaryName": "BandwidthX",
   "identifier": "com.bandwidthx.desktop",
   "build": {
     "frontendDist": "../dist",
