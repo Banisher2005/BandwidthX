@@ -32,9 +32,6 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Run automated test suite
-        run: cargo test --workspace --exclude bandwidthx-service
-
       - name: Build privileged Windows service
         run: cargo build --release -p bandwidthx-service
 
@@ -43,7 +40,12 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force src-tauri/resources | Out-Null
           Copy-Item target/release/bandwidthx-service.exe src-tauri/resources/bandwidthx-service.exe -Force
-          if (!(Test-Path src-tauri/resources/bandwidthx-service.exe)) { throw "The BandwidthX service binary was not staged." }
+          $staged = Get-Item src-tauri/resources/bandwidthx-service.exe
+          if (!$staged -or $staged.Length -lt 500KB) { throw "The BandwidthX service binary was not staged properly." }
+          Write-Host "Staged service binary: $($staged.FullName) ($($staged.Length) bytes)"
+
+      - name: Run automated test suite
+        run: cargo test --workspace --exclude bandwidthx-service
 
       - name: Build NSIS setup executable
         run: npx tauri build --bundles nsis
@@ -68,7 +70,7 @@ jobs:
           $installer = Get-ChildItem target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
           Write-Host "Running silent installation test..."
           Start-Process -FilePath $installer.FullName -ArgumentList "/S" -Wait
-          Start-Sleep -Seconds 5
+          Start-Sleep -Seconds 6
 
           $installedDir = "$env:ProgramFiles\BandwidthX"
           Write-Host "Verifying installation at $installedDir..."
@@ -92,7 +94,7 @@ jobs:
           Write-Host "Testing uninstallation..."
           if (Test-Path "$installedDir\uninstall.exe") {
             Start-Process -FilePath "$installedDir\uninstall.exe" -ArgumentList "/S" -Wait
-            Start-Sleep -Seconds 5
+            Start-Sleep -Seconds 6
             sc.exe query BandwidthX
             Write-Host "Uninstallation completed."
           }
@@ -112,7 +114,7 @@ jobs:
         with:
           tag_name: v3.0.0
           name: BandwidthX 3.0.0 — Windows Release
-          target_commitish: main
+          target_commitish: ${{ github.sha }}
           draft: false
           prerelease: false
           body_path: RELEASE_NOTES.md
