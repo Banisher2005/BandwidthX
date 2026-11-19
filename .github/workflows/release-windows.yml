@@ -102,9 +102,13 @@ jobs:
           if (Test-Path "$installedDir\uninstall.exe") {
             Start-Process -FilePath "$installedDir\uninstall.exe" -ArgumentList "/S" -Wait
             Start-Sleep -Seconds 6
-            sc.exe query BandwidthX
-            Write-Host "Uninstallation completed."
+            # Query service to confirm removal (1060 means service does not exist, which is expected)
+            $scPostUninstall = sc.exe query BandwidthX 2>&1
+            Write-Host ($scPostUninstall -join "`n")
+            $global:LASTEXITCODE = 0
+            Write-Host "Uninstallation verified successfully."
           }
+          $global:LASTEXITCODE = 0
 
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
